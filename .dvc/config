@@ -2,4 +2,4 @@
     remote = gcsremote
 ['remote "gcsremote"']
     url = gs://raw_data_lvlup/dvcstore
-    credentialpath = ../secrets/gcp-sa.json
+    credentialpath = /home/codevardhan/College/MLOPS/Project/pipeline/secrets/gcp-sa.json
