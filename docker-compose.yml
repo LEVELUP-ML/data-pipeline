@@ -13,6 +13,7 @@ services:
       _AIRFLOW_WWW_USER_USERNAME: admin
       _AIRFLOW_WWW_USER_PASSWORD: admin
 
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/secrets/gcp-sa.json
       # Kaggle env auth
       KAGGLE_USERNAME: ${KAGGLE_USERNAME:?set KAGGLE_USERNAME}
       KAGGLE_KEY: ${KAGGLE_KEY:?set KAGGLE_KEY}
@@ -21,6 +22,9 @@ services:
       - ./data:/opt/airflow/data
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
+      - ./.dvc:/opt/airflow/.dvc
+      - ./.git:/opt/airflow/.git
+      - ./secrets:/opt/airflow/secrets
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,6 +46,8 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW_UID: ${AIRFLOW_UID:-1000}
 
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/secrets/gcp-sa.json
+
       KAGGLE_USERNAME: ${KAGGLE_USERNAME:?set KAGGLE_USERNAME}
       KAGGLE_KEY: ${KAGGLE_KEY:?set KAGGLE_KEY}
     volumes:
@@ -49,6 +55,9 @@ services:
       - ./data:/opt/airflow/data
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
+      - ./.dvc:/opt/airflow/.dvc 
+      - ./.git:/opt/airflow/.git
+      - ./secrets:/opt/airflow/secrets
     ports:
       - "8081:8080"
     command: webserver
@@ -69,6 +78,8 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW_UID: ${AIRFLOW_UID:-1000}
 
+      GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/secrets/gcp-sa.json
+
       KAGGLE_USERNAME: ${KAGGLE_USERNAME:?set KAGGLE_USERNAME}
       KAGGLE_KEY: ${KAGGLE_KEY:?set KAGGLE_KEY}
     volumes:
@@ -76,6 +87,9 @@ services:
       - ./data:/opt/airflow/data
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
+      - ./.dvc:/opt/airflow/.dvc
+      - ./.git:/opt/airflow/.git
+      - ./secrets:/opt/airflow/secrets
     command: scheduler
 
   postgres:
