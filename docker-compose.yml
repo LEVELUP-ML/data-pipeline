@@ -2,10 +2,12 @@ services:
   airflow-init:
     build: .
     container_name: airflow-init
+    user: "${AIRFLOW_UID:-1000}:0"
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW_UID: ${AIRFLOW_UID:-1000}
 
       # create admin user on first init
       _AIRFLOW_WWW_USER_USERNAME: admin
@@ -27,6 +29,7 @@ services:
   airflow-webserver:
     build: .
     container_name: airflow-webserver
+    user: "${AIRFLOW_UID:-1000}:0"
     restart: unless-stopped
     depends_on:
       airflow-init:
@@ -37,6 +40,7 @@ services:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW_UID: ${AIRFLOW_UID:-1000}
 
       KAGGLE_USERNAME: ${KAGGLE_USERNAME:?set KAGGLE_USERNAME}
       KAGGLE_KEY: ${KAGGLE_KEY:?set KAGGLE_KEY}
@@ -52,6 +56,7 @@ services:
   airflow-scheduler:
     build: .
     container_name: airflow-scheduler
+    user: "${AIRFLOW_UID:-1000}:0"
     restart: unless-stopped
     depends_on:
       airflow-init:
@@ -62,6 +67,7 @@ services:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW_UID: ${AIRFLOW_UID:-1000}
 
       KAGGLE_USERNAME: ${KAGGLE_USERNAME:?set KAGGLE_USERNAME}
       KAGGLE_KEY: ${KAGGLE_KEY:?set KAGGLE_KEY}
