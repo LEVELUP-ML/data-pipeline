@@ -3,10 +3,9 @@
 __pycache__
 .vscode
 
-# Ignore the contents of data/, but NOT DVC metadata files
-data/**
+# Ignore the contents of data/raw, but NOT DVC metadata files
+data/raw/
 !data/**/*.dvc
-
 
 logs/
 secrets
