@@ -1,5 +1,12 @@
 .env
-logs/
-data/
-__pycache__
 .venv
+__pycache__
+.vscode
+
+# Ignore the contents of data/, but NOT DVC metadata files
+data/**
+!data/**/*.dvc
+
+
+logs/
+secrets
