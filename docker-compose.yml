@@ -17,6 +17,13 @@ services:
       # Kaggle env auth
       KAGGLE_USERNAME: ${KAGGLE_USERNAME:?set KAGGLE_USERNAME}
       KAGGLE_KEY: ${KAGGLE_KEY:?set KAGGLE_KEY}
+
+      AIRFLOW_VAR_GCS_BACKUP_BUCKET: "raw_data_lvlup"
+      AIRFLOW_VAR_FIREBASE_SERVICE_ACCOUNT_PATH: "/opt/airflow/secrets/firebase-admin.json"
+      AIRFLOW_VAR_BACKUP_PREFIX: "firestore_backups/metric_events"
+      AIRFLOW_VAR_MAX_DOCS_PER_RUN: "500000"
+      AIRFLOW_VAR_CHUNK_SIZE: "5000"
+
     volumes:
       - ./dags:/opt/airflow/dags
       - ./data:/opt/airflow/data
@@ -47,6 +54,12 @@ services:
       AIRFLOW_UID: ${AIRFLOW_UID:-1000}
 
       GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/secrets/gcp-sa.json
+
+      AIRFLOW_VAR_GCS_BACKUP_BUCKET: "raw_data_lvlup"
+      AIRFLOW_VAR_FIREBASE_SERVICE_ACCOUNT_PATH: "/opt/airflow/secrets/firebase-admin.json"
+      AIRFLOW_VAR_BACKUP_PREFIX: "firestore_backups/metric_events"
+      AIRFLOW_VAR_MAX_DOCS_PER_RUN: "500000"
+      AIRFLOW_VAR_CHUNK_SIZE: "5000"
 
       KAGGLE_USERNAME: ${KAGGLE_USERNAME:?set KAGGLE_USERNAME}
       KAGGLE_KEY: ${KAGGLE_KEY:?set KAGGLE_KEY}
@@ -82,6 +95,13 @@ services:
 
       KAGGLE_USERNAME: ${KAGGLE_USERNAME:?set KAGGLE_USERNAME}
       KAGGLE_KEY: ${KAGGLE_KEY:?set KAGGLE_KEY}
+
+      AIRFLOW_VAR_GCS_BACKUP_BUCKET: "raw_data_lvlup"
+      AIRFLOW_VAR_FIREBASE_SERVICE_ACCOUNT_PATH: "/opt/airflow/secrets/firebase-admin.json"
+      AIRFLOW_VAR_BACKUP_PREFIX: "firestore_backups/metric_events"
+      AIRFLOW_VAR_MAX_DOCS_PER_RUN: "500000"
+      AIRFLOW_VAR_CHUNK_SIZE: "5000"
+
     volumes:
       - ./dags:/opt/airflow/dags
       - ./data:/opt/airflow/data

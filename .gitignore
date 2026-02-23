@@ -9,3 +9,4 @@ data/raw/
 
 logs/
 secrets
+.gitconfig

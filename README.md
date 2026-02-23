@@ -2,8 +2,6 @@
 
 End-to-end MLOps pipeline for data ingestion -> processing -> training -> evaluation -> orchestration with Airflow -> tracking with MLflow.
 
-> Note: Data versioning (DVC) will be added later. For now, data is managed locally.
-
 ## 1) Project Structure
 
 ```
@@ -81,4 +79,4 @@ docker compose down -v
 
 ## 6) What’s Next (Planned)
 
-* [ ] Add DVC for data versioning + remote storage (GCS)
+* [ ] Add testing/monitoring code
