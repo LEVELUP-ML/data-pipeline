@@ -33,7 +33,7 @@ x-airflow-common: &airflow-common
     AIRFLOW_VAR_MAX_DOCS_PER_RUN: "500000"
     AIRFLOW_VAR_CHUNK_SIZE: "5000"
 
-  volumes: &airflow-volumes
+  volumes: 
     - ./dags:/opt/airflow/dags
     - ./data:/opt/airflow/data
     - ./logs:/opt/airflow/logs
