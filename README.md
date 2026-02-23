@@ -74,7 +74,11 @@ docker compose logs -f postgres
 ### 5.4 Reset local state (dev only)
 
 ```bash
+docker compose down
+# Nuclear — also removes volumes (deletes DB, logs)
 docker compose down -v
+# Start back up
+docker compose up -d
 ```
 
 ## 6) What’s Next (Planned)

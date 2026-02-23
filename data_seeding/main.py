@@ -20,12 +20,10 @@ def clamp(x, lo=0.0, hi=100.0):
 
 
 def score_to_level(score: float) -> int:
-    # 0-100 -> 0-10 levels
     return int(clamp(score) // 10)
 
 
 def metric_components(metric: str, score: float) -> dict:
-    # Lightweight, plausible placeholders. Replace with your real signals later.
     if metric == "strength":
         return {
             "bench_1rm": int(95 + score * 2.0),
@@ -38,7 +36,6 @@ def metric_components(metric: str, score: float) -> dict:
             "resting_hr": int(75 - score * 0.15),
         }
     if metric == "speed":
-        # lower time is better; keep as a component but score stays "higher is better"
         sprint = round(18.5 - score * 0.05, 2)
         return {"sprint_100m_sec": clamp(sprint, 9.5, 25.0)}
     if metric == "flexibility":
@@ -184,7 +181,7 @@ def main():
 
     db = init_firestore(args.service_account)
 
-    # Seed starting from today (UTC day string is fine; you can adapt to user tz later)
+    # Seed starting from today
     start_day = datetime.now(timezone.utc) - timedelta(days=args.days)
 
     for idx in range(args.num_users):

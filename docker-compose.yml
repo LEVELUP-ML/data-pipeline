@@ -1,115 +1,91 @@
+# Shared config
+x-airflow-common: &airflow-common
+  build: .
+  user: "${AIRFLOW_UID:-1000}:0"
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+
+    # DAG subfolder scanning
+    AIRFLOW__CORE__DAG_DISCOVERY_SAFE_MODE: "true"
+
+    # Scheduler tuning
+    AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "60"
+    AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: "30"
+
+    # Logging
+    AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/airflow/logs
+    AIRFLOW__LOGGING__REMOTE_LOGGING: "false"
+
+    # GCP / Firebase
+    GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/secrets/gcp-sa.json
+
+    # Kaggle
+    KAGGLE_USERNAME: ${KAGGLE_USERNAME:?set KAGGLE_USERNAME}
+    KAGGLE_KEY: ${KAGGLE_KEY:?set KAGGLE_KEY}
+
+    # Airflow Variables (injected as env vars)
+    AIRFLOW_VAR_GCS_BACKUP_BUCKET: "raw_data_lvlup"
+    AIRFLOW_VAR_FIREBASE_SERVICE_ACCOUNT_PATH: "/opt/airflow/secrets/firebase-admin.json"
+    AIRFLOW_VAR_BACKUP_PREFIX: "firestore_backups/metric_events"
+    AIRFLOW_VAR_MAX_DOCS_PER_RUN: "500000"
+    AIRFLOW_VAR_CHUNK_SIZE: "5000"
+
+  volumes: &airflow-volumes
+    - ./dags:/opt/airflow/dags
+    - ./data:/opt/airflow/data
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    - ./.dvc:/opt/airflow/.dvc
+    - ./.git:/opt/airflow/.git
+    - ./secrets:/opt/airflow/secrets
+
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+# Services 
 services:
   airflow-init:
-    build: .
+    <<: *airflow-common
     container_name: airflow-init
-    user: "${AIRFLOW_UID:-1000}:0"
     environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW_UID: ${AIRFLOW_UID:-1000}
-
-      # create admin user on first init
+      <<: *airflow-env
       _AIRFLOW_WWW_USER_USERNAME: admin
       _AIRFLOW_WWW_USER_PASSWORD: admin
-
-      GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/secrets/gcp-sa.json
-      # Kaggle env auth
-      KAGGLE_USERNAME: ${KAGGLE_USERNAME:?set KAGGLE_USERNAME}
-      KAGGLE_KEY: ${KAGGLE_KEY:?set KAGGLE_KEY}
-
-      AIRFLOW_VAR_GCS_BACKUP_BUCKET: "raw_data_lvlup"
-      AIRFLOW_VAR_FIREBASE_SERVICE_ACCOUNT_PATH: "/opt/airflow/secrets/firebase-admin.json"
-      AIRFLOW_VAR_BACKUP_PREFIX: "firestore_backups/metric_events"
-      AIRFLOW_VAR_MAX_DOCS_PER_RUN: "500000"
-      AIRFLOW_VAR_CHUNK_SIZE: "5000"
-
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./data:/opt/airflow/data
-      - ./logs:/opt/airflow/logs
-      - ./plugins:/opt/airflow/plugins
-      - ./.dvc:/opt/airflow/.dvc
-      - ./.git:/opt/airflow/.git
-      - ./secrets:/opt/airflow/secrets
-    depends_on:
-      postgres:
-        condition: service_healthy
-    command: bash -lc "airflow db init && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true"
+    command: >
+      bash -lc "
+        airflow db init &&
+        airflow users create
+          --username admin --password admin
+          --firstname Admin --lastname User
+          --role Admin --email admin@example.com || true
+      "
 
   airflow-webserver:
-    build: .
+    <<: *airflow-common
     container_name: airflow-webserver
-    user: "${AIRFLOW_UID:-1000}:0"
     restart: unless-stopped
     depends_on:
       airflow-init:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW_UID: ${AIRFLOW_UID:-1000}
-
-      GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/secrets/gcp-sa.json
-
-      AIRFLOW_VAR_GCS_BACKUP_BUCKET: "raw_data_lvlup"
-      AIRFLOW_VAR_FIREBASE_SERVICE_ACCOUNT_PATH: "/opt/airflow/secrets/firebase-admin.json"
-      AIRFLOW_VAR_BACKUP_PREFIX: "firestore_backups/metric_events"
-      AIRFLOW_VAR_MAX_DOCS_PER_RUN: "500000"
-      AIRFLOW_VAR_CHUNK_SIZE: "5000"
-
-      KAGGLE_USERNAME: ${KAGGLE_USERNAME:?set KAGGLE_USERNAME}
-      KAGGLE_KEY: ${KAGGLE_KEY:?set KAGGLE_KEY}
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./data:/opt/airflow/data
-      - ./logs:/opt/airflow/logs
-      - ./plugins:/opt/airflow/plugins
-      - ./.dvc:/opt/airflow/.dvc 
-      - ./.git:/opt/airflow/.git
-      - ./secrets:/opt/airflow/secrets
     ports:
       - "8081:8080"
     command: webserver
 
   airflow-scheduler:
-    build: .
+    <<: *airflow-common
     container_name: airflow-scheduler
-    user: "${AIRFLOW_UID:-1000}:0"
     restart: unless-stopped
     depends_on:
       airflow-init:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
-    environment:
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
-      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      AIRFLOW_UID: ${AIRFLOW_UID:-1000}
-
-      GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/secrets/gcp-sa.json
-
-      KAGGLE_USERNAME: ${KAGGLE_USERNAME:?set KAGGLE_USERNAME}
-      KAGGLE_KEY: ${KAGGLE_KEY:?set KAGGLE_KEY}
-
-      AIRFLOW_VAR_GCS_BACKUP_BUCKET: "raw_data_lvlup"
-      AIRFLOW_VAR_FIREBASE_SERVICE_ACCOUNT_PATH: "/opt/airflow/secrets/firebase-admin.json"
-      AIRFLOW_VAR_BACKUP_PREFIX: "firestore_backups/metric_events"
-      AIRFLOW_VAR_MAX_DOCS_PER_RUN: "500000"
-      AIRFLOW_VAR_CHUNK_SIZE: "5000"
-
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./data:/opt/airflow/data
-      - ./logs:/opt/airflow/logs
-      - ./plugins:/opt/airflow/plugins
-      - ./.dvc:/opt/airflow/.dvc
-      - ./.git:/opt/airflow/.git
-      - ./secrets:/opt/airflow/secrets
     command: scheduler
 
   postgres:
