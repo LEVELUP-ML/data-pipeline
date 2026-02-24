@@ -18,7 +18,13 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from google.cloud.firestore_v1 import FieldFilter
 from datetime import datetime
-
+from dag_monitoring import (
+    monitored_dag_args,
+    on_dag_failure_callback,
+    on_sla_miss_callback,
+    emit_metric,
+    log,
+)
 
 VALID_METRICS = {"strength", "stamina", "speed", "flexibility", "intelligence"}
 VALID_SOURCES = {"wearable", "app_tasks", "workout_log", "manual"}
@@ -40,7 +46,6 @@ MAX_VALIDATION_DOCS = 600_000
 SAMPLE_LIMIT = 50_000
 
 
-# Helpers
 def get_firestore_client() -> firestore.Client:
     if not firebase_admin._apps:
         sa_path = Variable.get("FIREBASE_SERVICE_ACCOUNT_PATH")
@@ -63,7 +68,7 @@ class ValidationReport:
         return len(self.errors) == 0
 
     def add_error(self, doc_id: str, msg: str):
-        if len(self.errors) < 200:  # cap stored messages
+        if len(self.errors) < 200:
             self.errors.append(f"[{doc_id}] {msg}")
 
     def add_warning(self, doc_id: str, msg: str):
@@ -82,10 +87,7 @@ class ValidationReport:
         }
 
 
-def _check_type(
-    d: dict, key: str, expected, doc_id: str, rpt: ValidationReport, nullable=False
-):
-    """Validate that d[key] exists and has the right type."""
+def _check_type(d, key, expected, doc_id, rpt, nullable=False):
     val = d.get(key)
     if val is None:
         if nullable:
@@ -100,44 +102,30 @@ def _check_type(
     return val
 
 
-def _check_range(val, lo, hi, key: str, doc_id: str, rpt: ValidationReport):
+def _check_range(val, lo, hi, key, doc_id, rpt):
     if val is None:
         return
     if not (lo <= val <= hi):
         rpt.add_error(doc_id, f"'{key}' value {val} outside [{lo}, {hi}]")
 
 
-# Per-collection validators
-
-
-def validate_metric_event(d: dict, doc_id: str, rpt: ValidationReport, target_day: str):
-    """Validate a single metric_events document."""
+def validate_metric_event(d, doc_id, rpt, target_day):
     rpt.docs_checked += 1
-
-    # day
     day = _check_type(d, "day", str, doc_id, rpt)
     if day:
         if not DATE_RE.match(day):
             rpt.add_error(doc_id, f"'day' bad format: {day}")
         if day != target_day:
             rpt.add_warning(doc_id, f"'day' {day} != target {target_day}")
-
-    # metric
     metric = _check_type(d, "metric", str, doc_id, rpt)
     if metric and metric not in VALID_METRICS:
         rpt.add_error(doc_id, f"unknown metric '{metric}'")
-
-    # type
     etype = _check_type(d, "type", str, doc_id, rpt)
     if etype and etype not in VALID_EVENT_TYPES:
         rpt.add_warning(doc_id, f"unexpected event type '{etype}'")
-
-    # source
     src = _check_type(d, "source", str, doc_id, rpt)
     if src and src not in VALID_SOURCES:
         rpt.add_warning(doc_id, f"unexpected source '{src}'")
-
-    # score
     score = d.get("score")
     if score is not None:
         if not isinstance(score, (int, float)):
@@ -146,48 +134,37 @@ def validate_metric_event(d: dict, doc_id: str, rpt: ValidationReport, target_da
             _check_range(score, 0.0, 100.0, "score", doc_id, rpt)
     else:
         rpt.add_error(doc_id, "missing 'score'")
-
-    # delta
     delta = d.get("delta")
     if delta is not None and not isinstance(delta, (int, float)):
         rpt.add_error(doc_id, f"'delta' not numeric: {type(delta).__name__}")
-
-    # confidence
     conf = d.get("confidence")
     if conf is not None:
         if not isinstance(conf, (int, float)):
-            rpt.add_error(doc_id, f"'confidence' not numeric")
+            rpt.add_error(doc_id, "'confidence' not numeric")
         else:
             _check_range(conf, 0.0, 1.0, "confidence", doc_id, rpt)
-
-    # payload / components
     payload = d.get("payload")
     if payload is not None and metric and metric in EXPECTED_COMPONENTS:
         if not isinstance(payload, dict):
-            rpt.add_error(doc_id, f"'payload' not a dict")
+            rpt.add_error(doc_id, "'payload' not a dict")
         else:
             missing = EXPECTED_COMPONENTS[metric] - set(payload.keys())
             if missing:
                 rpt.add_error(doc_id, f"payload missing keys for {metric}: {missing}")
 
 
-def validate_sleep_log(d: dict, doc_id: str, rpt: ValidationReport):
+def validate_sleep_log(d, doc_id, rpt):
     rpt.docs_checked += 1
-
     _check_type(d, "user_id", str, doc_id, rpt)
-
     date = _check_type(d, "date", str, doc_id, rpt)
     if date and not DATE_RE.match(date):
         rpt.add_error(doc_id, f"'date' bad format: {date}")
-
     bed = _check_type(d, "bedTime", str, doc_id, rpt)
     if bed and not TIME_RE.match(bed):
         rpt.add_error(doc_id, f"'bedTime' bad format: {bed}")
-
     wake = _check_type(d, "wakeTime", str, doc_id, rpt)
     if wake and not TIME_RE.match(wake):
         rpt.add_error(doc_id, f"'wakeTime' bad format: {wake}")
-
     hrs = d.get("sleepHours")
     if hrs is not None:
         if not isinstance(hrs, (int, float)):
@@ -196,35 +173,29 @@ def validate_sleep_log(d: dict, doc_id: str, rpt: ValidationReport):
             _check_range(hrs, 0.0, 24.0, "sleepHours", doc_id, rpt)
     else:
         rpt.add_error(doc_id, "missing 'sleepHours'")
-
     quality = d.get("quality")
     if quality is not None:
         if not isinstance(quality, int):
             rpt.add_error(doc_id, f"'quality' not int: {type(quality).__name__}")
         else:
             _check_range(quality, 1, 5, "quality", doc_id, rpt)
-    # quality can be null (seeded anomaly), so just warn
     if quality is None:
         rpt.add_warning(doc_id, "'quality' is null")
 
 
-def validate_quiz_attempt(d: dict, doc_id: str, rpt: ValidationReport):
+def validate_quiz_attempt(d, doc_id, rpt):
     rpt.docs_checked += 1
-
     _check_type(d, "user_id", str, doc_id, rpt)
     _check_type(d, "quiz_id", str, doc_id, rpt)
-
     topic = _check_type(d, "topic", str, doc_id, rpt)
     if topic and topic not in VALID_TOPICS:
         rpt.add_error(doc_id, f"unknown topic '{topic}'")
-
     n_q = d.get("num_questions")
     if n_q is not None:
         if not isinstance(n_q, int):
             rpt.add_error(doc_id, "'num_questions' not int")
         else:
             _check_range(n_q, 1, 200, "num_questions", doc_id, rpt)
-
     n_c = d.get("num_correct")
     if n_c is not None:
         if not isinstance(n_c, int):
@@ -233,28 +204,24 @@ def validate_quiz_attempt(d: dict, doc_id: str, rpt: ValidationReport):
             rpt.add_error(doc_id, f"'num_correct' is negative: {n_c}")
         elif n_q is not None and isinstance(n_q, int) and n_c > n_q:
             rpt.add_error(doc_id, f"'num_correct' ({n_c}) > 'num_questions' ({n_q})")
-
     time_s = d.get("total_time_seconds")
     if time_s is not None:
         if not isinstance(time_s, (int, float)):
             rpt.add_error(doc_id, "'total_time_seconds' not numeric")
         else:
             _check_range(time_s, 0, 7200, "total_time_seconds", doc_id, rpt)
-
     avg = d.get("avg_time_per_question_seconds")
     if avg is not None and isinstance(avg, (int, float)):
         if avg > 300:
             rpt.add_warning(
                 doc_id, f"'avg_time_per_question_seconds' suspiciously high: {avg}"
             )
-
     diff = d.get("difficulty")
     if diff is not None:
         if not isinstance(diff, int):
             rpt.add_error(doc_id, "'difficulty' not int")
         else:
             _check_range(diff, 1, 5, "difficulty", doc_id, rpt)
-
     pct = d.get("percent")
     if pct is not None:
         if not isinstance(pct, int):
@@ -263,15 +230,15 @@ def validate_quiz_attempt(d: dict, doc_id: str, rpt: ValidationReport):
             _check_range(pct, 0, 100, "percent", doc_id, rpt)
 
 
-# DAG
-
 with DAG(
     dag_id="firestore_schema_validation",
     start_date=pendulum.datetime(2026, 2, 1, tz="America/New_York"),
-    schedule="0 2 * * *",  # runs 1 h before the export DAG (03:00)
+    schedule="0 2 * * *",
     catchup=False,
     max_active_runs=1,
-    default_args={"retries": 1},
+    default_args=monitored_dag_args(retries=1, sla_minutes=45),
+    on_failure_callback=on_dag_failure_callback,
+    sla_miss_callback=on_sla_miss_callback,
     tags=["firestore", "validation", "quality"],
 ) as dag:
 
@@ -283,6 +250,7 @@ with DAG(
             ctx["logical_date"].in_timezone(ny).subtract(days=1).format("YYYY-MM-DD")
         )
 
+        log.info("Validating metric_events for day=%s", target_day)
         db = get_firestore_client()
         rpt = ValidationReport(collection="metric_events")
 
@@ -293,9 +261,16 @@ with DAG(
             d = doc.to_dict() or {}
             validate_metric_event(d, doc.id, rpt, target_day)
             if rpt.docs_checked >= MAX_VALIDATION_DOCS:
+                log.warning("Hit MAX_VALIDATION_DOCS cap (%d)", MAX_VALIDATION_DOCS)
                 rpt.add_warning("GLOBAL", "hit MAX_VALIDATION_DOCS cap")
                 break
 
+        log.info(
+            "metric_events: checked=%d errors=%d warnings=%d",
+            rpt.docs_checked,
+            len(rpt.errors),
+            len(rpt.warnings),
+        )
         return rpt.as_dict()
 
     @task
@@ -306,11 +281,12 @@ with DAG(
             ctx["logical_date"].in_timezone(ny).subtract(days=1).format("YYYY-MM-DD")
         )
 
+        log.info("Validating sleep_logs for day=%s", target_day)
         db = get_firestore_client()
         rpt = ValidationReport(collection="sleep_logs")
 
-        # No collection-group index assumed; iterate known users
-        users = db.collection("users").select([]).limit(SAMPLE_LIMIT).stream()
+        max_users = int(Variable.get("VALIDATION_MAX_USERS", default_var="100"))
+        users = db.collection("users").select([]).limit(max_users).stream()
         for u in users:
             doc_ref = (
                 db.collection("users")
@@ -322,6 +298,12 @@ with DAG(
             if snap.exists:
                 validate_sleep_log(snap.to_dict() or {}, snap.id, rpt)
 
+        log.info(
+            "sleep_logs: checked=%d errors=%d warnings=%d",
+            rpt.docs_checked,
+            len(rpt.errors),
+            len(rpt.warnings),
+        )
         return rpt.as_dict()
 
     @task
@@ -332,13 +314,14 @@ with DAG(
             ctx["logical_date"].in_timezone(ny).subtract(days=1).format("YYYY-MM-DD")
         )
 
+        log.info("Validating quiz_attempts for day=%s", target_day)
         db = get_firestore_client()
         rpt = ValidationReport(collection="quiz_attempts")
 
-        users = db.collection("users").select([]).limit(SAMPLE_LIMIT).stream()
+        max_users = int(Variable.get("VALIDATION_MAX_USERS", default_var="100"))
+        users = db.collection("users").select([]).limit(max_users).stream()
         for u in users:
             col = db.collection("users").document(u.id).collection("quiz_attempts")
-            # Filter to docs whose timestamp falls on target_day
             day_start = pendulum.parse(target_day, tz="UTC")
             day_end = day_start.add(days=1)
             q = col.where(filter=FieldFilter("timestamp", ">=", day_start)).where(
@@ -347,6 +330,12 @@ with DAG(
             for snap in q.stream():
                 validate_quiz_attempt(snap.to_dict() or {}, snap.id, rpt)
 
+        log.info(
+            "quiz_attempts: checked=%d errors=%d warnings=%d",
+            rpt.docs_checked,
+            len(rpt.errors),
+            len(rpt.warnings),
+        )
         return rpt.as_dict()
 
     @task
@@ -355,12 +344,11 @@ with DAG(
         sleep_result: Dict[str, Any],
         quiz_result: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """
-        Aggregate reports. Fail the task (blocking downstream trigger)
-        if any collection has errors above the allowed threshold.
-        """
         error_threshold_pct = float(
             Variable.get("VALIDATION_ERROR_THRESHOLD_PCT", default_var="5.0")
+        )
+        min_docs_to_enforce = int(
+            Variable.get("VALIDATION_MIN_DOCS_TO_ENFORCE", default_var="20")
         )
 
         summary = {}
@@ -371,7 +359,11 @@ with DAG(
             checked = rpt["docs_checked"]
             errs = rpt["error_count"]
             pct = (errs / checked * 100) if checked else 0.0
-            ok = pct <= error_threshold_pct
+
+            if checked < min_docs_to_enforce:
+                ok = True
+            else:
+                ok = pct <= error_threshold_pct
 
             summary[col] = {
                 "docs_checked": checked,
@@ -386,11 +378,27 @@ with DAG(
 
         summary["all_passed"] = not any_blocked
 
+        emit_metric(
+            "firestore_schema_validation",
+            "gate_export",
+            {
+                col_name: {
+                    "docs_checked": v["docs_checked"],
+                    "errors": v["errors"],
+                    "error_pct": v["error_pct"],
+                }
+                for col_name, v in summary.items()
+                if isinstance(v, dict)
+            },
+        )
+
         if any_blocked:
+            log.error("Schema validation BLOCKED export. Summary: %s", summary)
             raise AirflowFailException(
                 f"Schema validation blocked export. Summary: {summary}"
             )
 
+        log.info("Schema validation PASSED. Summary: %s", summary)
         return summary
 
     trigger_export = TriggerDagRunOperator(

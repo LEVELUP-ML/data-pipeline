@@ -18,15 +18,18 @@ from airflow.providers.google.cloud.hooks.gcs import GCSHook
 import firebase_admin
 from firebase_admin import credentials, firestore
 from google.cloud.firestore_v1 import FieldFilter
-
+from dag_monitoring import (
+    monitored_dag_args,
+    on_dag_failure_callback,
+    on_sla_miss_callback,
+    emit_metric,
+    log,
+)
 
 DEFAULT_BACKUP_PREFIX = "firestore_backups/metric_events"
 
 
 def get_firestore_client() -> firestore.Client:
-    """
-    Initialize firebase-admin exactly once per worker process.
-    """
     if not firebase_admin._apps:
         sa_path = Variable.get("FIREBASE_SERVICE_ACCOUNT_PATH")
         if not os.path.exists(sa_path):
@@ -54,10 +57,6 @@ def jsonl_from_rows(rows: List[Dict[str, Any]]) -> bytes:
 def _json_default(obj):
     if isinstance(obj, datetime):
         return obj.isoformat()
-    if isinstance(obj, GeoPoint):
-        return {"lat": obj.latitude, "lng": obj.longitude}
-    if isinstance(obj, DocumentReference):
-        return obj.path
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
@@ -67,29 +66,32 @@ with DAG(
     schedule="0 3 * * *",
     catchup=False,
     max_active_runs=1,
-    default_args={"retries": 2},
+    default_args=monitored_dag_args(retries=2, sla_minutes=60),
+    on_failure_callback=on_dag_failure_callback,
+    sla_miss_callback=on_sla_miss_callback,
     tags=["firestore", "backup", "gcs", "metrics"],
 ) as dag:
 
     @task
     def export_day_to_gcs() -> Dict[str, Any]:
-        """
-        Export yesterday's metric_events (by the stored 'day' field) into GCS,
-        partitioned by day and metric.
-        """
         bucket = Variable.get("GCS_BACKUP_BUCKET")
         prefix = Variable.get("BACKUP_PREFIX", default_var=DEFAULT_BACKUP_PREFIX)
         max_docs = int(Variable.get("MAX_DOCS_PER_RUN", default_var="500000"))
         chunk_size = int(Variable.get("CHUNK_SIZE", default_var="5000"))
 
         ctx = get_current_context()
-        logical_date = ctx["logical_date"]  # tz-aware pendulum dt
+        logical_date = ctx["logical_date"]
         ny = pendulum.timezone("America/New_York")
         target_day = logical_date.in_timezone(ny).subtract(days=1).format("YYYY-MM-DD")
 
-        db = get_firestore_client()
+        log.info(
+            "Exporting metric_events for day=%s to gs://%s/%s",
+            target_day,
+            bucket,
+            prefix,
+        )
 
-        # Collection group query across all users/*/metric_events/*
+        db = get_firestore_client()
         q = db.collection_group("metric_events").where(
             filter=FieldFilter("day", "==", target_day)
         )
@@ -120,24 +122,25 @@ with DAG(
                 mime_type="application/json",
             )
             uploaded_objects += 1
+            log.info("Uploaded %s (%d rows)", object_name, len(rows))
             per_metric_buffers[metric].clear()
 
         for doc in docs_iter:
             total_docs += 1
             if total_docs > max_docs:
+                log.error("Exceeded MAX_DOCS_PER_RUN=%d", max_docs)
                 raise AirflowFailException(
-                    f"Aborting: exceeded MAX_DOCS_PER_RUN={max_docs}. "
-                    "Either raise the cap or fix your export window/filters."
+                    f"Aborting: exceeded MAX_DOCS_PER_RUN={max_docs}."
                 )
 
             d = doc.to_dict() or {}
             metric = d.get("metric")
             if not metric:
+                log.error("Doc %s missing 'metric' field", doc.id)
                 raise AirflowFailException(
                     f"metric_events doc {doc.id} missing 'metric'"
                 )
 
-            # extract uid from path users/{uid}/metric_events/{eventId}
             path_parts = doc.reference.path.split("/")
             uid = None
             try:
@@ -153,12 +156,25 @@ with DAG(
         for metric in list(per_metric_buffers.keys()):
             flush_metric(metric)
 
-        return {
+        result = {
             "day": target_day,
             "docs_exported": total_docs,
             "objects_written": uploaded_objects,
             "bucket": bucket,
             "prefix": prefix,
         }
+
+        emit_metric(
+            "firestore_metric_events_to_gcs",
+            "export_day_to_gcs",
+            {
+                "docs_exported": total_docs,
+                "objects_written": uploaded_objects,
+                "day": target_day,
+            },
+        )
+
+        log.info("Export complete: %s", result)
+        return result
 
     export_day_to_gcs()

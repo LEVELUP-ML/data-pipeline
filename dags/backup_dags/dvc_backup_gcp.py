@@ -1,6 +1,11 @@
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 from datetime import datetime
+from dag_monitoring import (
+    monitored_dag_args,
+    on_dag_failure_callback,
+    on_sla_miss_callback,
+)
 
 AIRFLOW_HOME = "/opt/airflow"
 
@@ -9,6 +14,9 @@ with DAG(
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
+    default_args=monitored_dag_args(retries=2, sla_minutes=20),
+    on_failure_callback=on_dag_failure_callback,
+    sla_miss_callback=on_sla_miss_callback,
     tags=["dvc", "gcp", "backup"],
 ) as dag:
 
@@ -59,4 +67,3 @@ with DAG(
     )
 
     [dvc_add_raw, dvc_add_processed] >> dvc_push >> git_commit
- 
