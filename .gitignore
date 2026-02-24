@@ -8,6 +8,7 @@ __pycache__/
 
 # Ignore the contents of data/raw, but NOT DVC metadata files
 data/raw/
+data/reports/
 !data/**/*.dvc
 
 logs/
