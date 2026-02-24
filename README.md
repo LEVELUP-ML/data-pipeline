@@ -55,6 +55,81 @@ pytest
 pytest --cov=tests --cov-report=term-missing
 ```
 
+
+## Reproducing on Another Machine
+
+### Prerequisites
+
+- Docker and Docker Compose installed
+- Git installed
+- A Google Cloud service account JSON with Firestore + GCS access
+- A Kaggle account (for dataset downloads)
+- Python 3.11+ (only needed if running tests locally outside Docker)
+
+### Step-by-step
+
+```bash
+# 1. Clone the repo
+git clone <repo-url>
+cd <repo>
+
+# 2. Create .env file with your Kaggle credentials
+cat > .env << EOF
+KAGGLE_USERNAME=your_username
+KAGGLE_KEY=your_api_key
+EOF
+
+# 3. Add your GCP service account key
+mkdir -p secrets
+cp /path/to/your/service-account.json secrets/gcp-sa.json
+cp /path/to/your/firebase-admin.json secrets/firebase-admin.json
+
+# 4. Restore data from DVC (no need to re-download anything)
+pip install dvc[gs]
+dvc pull
+
+# 5. Start Airflow
+docker compose up -d
+
+# 6. Wait for Airflow to initialize (~30 seconds), then verify
+docker compose ps
+docker exec -it airflow-scheduler airflow dags list
+
+# 7. Run any pipeline
+docker exec -it airflow-scheduler airflow dags trigger download_food_data
+docker exec -it airflow-scheduler airflow dags trigger download_wisdm_accel
+docker exec -it airflow-scheduler airflow dags trigger download_synthetic_from_firestore
+
+# 8. Run tests (locally or inside container)
+pip install -r requirements.txt
+pytest
+```
+
+### If you don't have GCP credentials
+
+You can still run most of the pipeline. Skip Firestore and GCS-related DAGs and work with the public datasets:
+
+```bash
+# Start Airflow
+docker compose up -d
+
+# Download and process weightlifting data (Kaggle)
+docker exec -it airflow-scheduler airflow dags trigger kaggle_download_strength
+docker exec -it airflow-scheduler airflow dags trigger clean_weightlifting_data
+
+# Download and process WISDM data (public, no credentials needed)
+docker exec -it airflow-scheduler airflow dags trigger download_wisdm_accel
+docker exec -it airflow-scheduler airflow dags trigger clean_wisdm_accel_data
+
+# Download and process Food-101 (public, no credentials needed)
+docker exec -it airflow-scheduler airflow dags trigger download_food_data
+```
+
+### If you don't have DVC set up
+
+All download DAGs fetch data from scratch, so `dvc pull` is optional. The pipeline will download, process, and store everything under `data/raw/` and `data/processed/` automatically.
+
+
 ## Pipeline Overview
 
 ![Pipeline Architecture](pipeline.png)
