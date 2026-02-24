@@ -1,0 +1,99 @@
+# dvc.yaml — Data pipeline stages tracked by DVC
+#
+# Run the full pipeline:  dvc repro
+# Run a single stage:     dvc repro <stage_name>
+# Check status:           dvc status
+# Push to remote:         dvc push
+
+stages:
+
+  #  Download
+
+  download_weightlifting:
+    cmd: >
+      mkdir -p data/raw/weightlifting &&
+      kaggle datasets download -d joep89/weightlifting
+      -p data/raw/weightlifting --unzip
+    outs:
+      - data/raw/weightlifting:
+          cache: true
+          persist: true
+
+  download_wisdm:
+    cmd: >
+      mkdir -p data/raw/wisdm &&
+      python scripts/download_wisdm.py --output-dir data/raw/wisdm
+    outs:
+      - data/raw/wisdm:
+          cache: true
+          persist: true
+
+  #  Clean / Process
+
+  clean_weightlifting:
+    cmd: python scripts/clean_weightlifting.py
+    deps:
+      - data/raw/weightlifting
+      - scripts/clean_weightlifting.py
+    outs:
+      - data/processed/weightlifting_cleaned:
+          cache: true
+      - data/processed/weightlifting_rejected:
+          cache: true
+          persist: true
+    metrics:
+      - data/processed/weightlifting_cleaned/summary.json:
+          cache: false
+
+  clean_wisdm:
+    cmd: python scripts/clean_wisdm.py
+    deps:
+      - data/raw/wisdm
+      - scripts/clean_wisdm.py
+    outs:
+      - data/processed/wisdm:
+          cache: true
+    metrics:
+      - data/processed/wisdm/summary.json:
+          cache: false
+
+  #  Stamina computation
+
+  compute_stamina:
+    cmd: python scripts/compute_stamina.py
+    deps:
+      - data/processed/wisdm
+      - scripts/compute_stamina.py
+    outs:
+      - data/processed/wisdm/wisdm_stamina.parquet:
+          cache: true
+    metrics:
+      - data/processed/wisdm/stamina_metrics.json:
+          cache: false
+
+  #  Bias analysis 
+
+  bias_analysis:
+    cmd: python scripts/bias_analysis.py
+    deps:
+      - data/processed/wisdm/wisdm_stamina.parquet
+      - data/processed/weightlifting_cleaned
+      - scripts/bias_analysis.py
+    outs:
+      - data/processed/bias_reports:
+          cache: true
+    metrics:
+      - data/processed/bias_reports/latest_bias.json:
+          cache: false
+
+  #  Tests
+
+  run_tests:
+    cmd: pytest tests/ -v --tb=short --junitxml=data/processed/test_results.xml
+    deps:
+      - tests/
+      - data/processed/wisdm
+      - data/processed/weightlifting_cleaned
+    metrics:
+      - data/processed/test_results.xml:
+          cache: false
