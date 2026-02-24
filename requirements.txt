@@ -1,3 +1,4 @@
 kaggle==1.6.17
 dvc[gs]
 firebase-admin
+scikit-learn
