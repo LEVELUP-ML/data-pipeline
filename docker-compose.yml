@@ -32,6 +32,7 @@ x-airflow-common: &airflow-common
     AIRFLOW_VAR_BACKUP_PREFIX: "firestore_backups/metric_events"
     AIRFLOW_VAR_MAX_DOCS_PER_RUN: "500000"
     AIRFLOW_VAR_CHUNK_SIZE: "5000"
+    AIRFLOW_VAR_ALERT_WEBHOOK_URL: "https://hooks.slack.com/services/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"
 
   volumes: 
     - ./dags:/opt/airflow/dags

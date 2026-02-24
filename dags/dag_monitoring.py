@@ -17,8 +17,6 @@ log = logging.getLogger("airflow.task")
 
 
 #  Slack / Webhook alerting
-
-
 def _send_webhook(payload: dict):
     """
     Post a JSON payload to a webhook URL (Slack, Teams, Discord, etc.).
