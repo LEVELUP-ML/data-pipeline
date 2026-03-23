@@ -1,0 +1,19 @@
+.env
+.venv
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+.vscode
+
+# Ignore the contents of data/raw, but NOT DVC metadata files
+data/raw/
+data/reports/
+!data/**/*.dvc
+
+logs/
+secrets
+.gitconfig
+.secrets
+.gcp
+data/models

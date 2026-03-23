@@ -1,0 +1,5 @@
+[core]
+    remote = gcsremote
+['remote "gcsremote"']
+    url = gs://raw_data_lvlup/dvcstore
+    credentialpath = /opt/airflow/secrets/gcp-sa.json
