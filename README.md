@@ -1,6 +1,6 @@
-# Level Up - MLOps Data Pipeline
+# Level Up — MLOps Full Pipeline
 
-End-to-end MLOps data pipeline for fitness and activity tracking data. Covers ingestion, cleaning, validation, stamina computation, bias monitoring, versioning, and alerting - orchestrated with Apache Airflow and versioned with DVC.
+End-to-end MLOps pipeline for a lifestyle gamification app. Covers data ingestion, cleaning, validation, feature engineering, model training, bias detection, experiment tracking, CI/CD automation, and alerting — orchestrated with Apache Airflow, versioned with DVC, and tracked with MLflow.
 
 ## Requirements
 
@@ -19,20 +19,30 @@ Create a `.env` file (do not commit):
 ```bash
 KAGGLE_USERNAME=your_username
 KAGGLE_KEY=your_api_key
-
 AIRFLOW_UID=1000
 ```
 
-### 2. Start Airflow
+### 2. Add secrets
+
+```bash
+mkdir -p secrets
+cp /path/to/your/gcp-service-account.json secrets/gcp-sa.json
+cp /path/to/your/firebase-admin.json secrets/firebase-admin.json
+```
+
+### 3. Start all services
 
 ```bash
 docker compose up -d
 docker compose ps
 ```
 
-Airflow UI: [http://localhost:8080](http://localhost:8080) (default: `admin` / `admin`)
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| Airflow UI | http://localhost:8081 | admin / admin |
+| MLflow UI | http://localhost:5001 | — |
 
-### 3. Initialize DVC
+### 4. Initialize DVC
 
 ```bash
 dvc init
@@ -47,7 +57,22 @@ git commit -m "feat: initialize DVC tracking"
 dvc push
 ```
 
-### 4. Run Tests
+### 5. Seed Firestore and run the flexibility pipeline
+
+```bash
+# Seed 20 users, 90 days of workout data
+docker exec airflow-scheduler python /opt/airflow/data_seeding/main.py \
+  --service-account /opt/airflow/secrets/firebase-admin.json \
+  --num-users 20 --days 90 --write-rollups --seed 42
+
+# Run feature engineering (downloads from Firestore, builds lag features)
+docker exec airflow-scheduler airflow dags trigger flexibility_features
+
+# Model DAG triggers automatically on success, or trigger manually
+docker exec airflow-scheduler airflow dags trigger flexibility_model
+```
+
+### 6. Run Tests
 
 ```bash
 pip install pytest pytest-cov
@@ -55,6 +80,7 @@ pytest
 pytest --cov=tests --cov-report=term-missing
 ```
 
+---
 
 ## Reproducing on Another Machine
 
@@ -62,9 +88,9 @@ pytest --cov=tests --cov-report=term-missing
 
 - Docker and Docker Compose installed
 - Git installed
-- A Google Cloud service account JSON with Firestore + GCS access
-- A Kaggle account (for dataset downloads)
-- Python 3.11+ (only needed if running tests locally outside Docker)
+- GCP service account JSON with Firestore + GCS access
+- Kaggle account (for dataset downloads)
+- Python 3.11+ (only needed for running tests locally outside Docker)
 
 ### Step-by-step
 
@@ -73,25 +99,26 @@ pytest --cov=tests --cov-report=term-missing
 git clone <repo-url>
 cd <repo>
 
-# 2. Create .env file with your Kaggle credentials
+# 2. Create .env
 cat > .env << EOF
 KAGGLE_USERNAME=your_username
 KAGGLE_KEY=your_api_key
+AIRFLOW_UID=1000
 EOF
 
-# 3. Add your GCP service account key
+# 3. Add service account keys
 mkdir -p secrets
-cp /path/to/your/service-account.json secrets/gcp-sa.json
-cp /path/to/your/firebase-admin.json secrets/firebase-admin.json
+cp /path/to/gcp-sa.json secrets/gcp-sa.json
+cp /path/to/firebase-admin.json secrets/firebase-admin.json
 
-# 4. Restore data from DVC (no need to re-download anything)
-pip install dvc[gs]
+# 4. Restore data from DVC
+pip install "dvc[gs]"
 dvc pull
 
-# 5. Start Airflow
+# 5. Start all services
 docker compose up -d
 
-# 6. Wait for Airflow to initialize (~30 seconds), then verify
+# 6. Verify
 docker compose ps
 docker exec -it airflow-scheduler airflow dags list
 
@@ -100,35 +127,27 @@ docker exec -it airflow-scheduler airflow dags trigger download_food_data
 docker exec -it airflow-scheduler airflow dags trigger download_wisdm_accel
 docker exec -it airflow-scheduler airflow dags trigger download_synthetic_from_firestore
 
-# 8. Run tests (locally or inside container)
+# 8. Run tests
 pip install -r requirements.txt
 pytest
 ```
 
 ### If you don't have GCP credentials
 
-You can still run most of the pipeline. Skip Firestore and GCS-related DAGs and work with the public datasets:
-
 ```bash
-# Start Airflow
 docker compose up -d
 
-# Download and process weightlifting data (Kaggle)
+# Kaggle datasets (requires Kaggle credentials only)
 docker exec -it airflow-scheduler airflow dags trigger kaggle_download_strength
 docker exec -it airflow-scheduler airflow dags trigger clean_weightlifting_data
 
-# Download and process WISDM data (public, no credentials needed)
+# Public datasets (no credentials needed)
 docker exec -it airflow-scheduler airflow dags trigger download_wisdm_accel
 docker exec -it airflow-scheduler airflow dags trigger clean_wisdm_accel_data
-
-# Download and process Food-101 (public, no credentials needed)
 docker exec -it airflow-scheduler airflow dags trigger download_food_data
 ```
 
-### If you don't have DVC set up
-
-All download DAGs fetch data from scratch, so `dvc pull` is optional. The pipeline will download, process, and store everything under `data/raw/` and `data/processed/` automatically.
-
+---
 
 ## Pipeline Overview
 
@@ -158,28 +177,171 @@ Download DAGs (manual trigger)
         │                               synthetic_anomaly_and_bias (monitoring_dags/)
         │                                 anomaly detection → bias analysis → slack
         ▼                                    ↓ triggers
-Processing DAGs (manual or triggered)        │
+Processing DAGs (manual or triggered)   dvc_backup_to_gcp
 ├── clean_weightlifting_data       → data/processed/weightlifting_cleaned/
-│   └── triggers: dvc_backup_to_gcp          │
+│   └── triggers: dvc_backup_to_gcp
 ├── clean_wisdm_accel_data         → data/processed/wisdm/
-│   └── triggers: dvc_backup_to_gcp          │
-└── firestore_schema_validation    (daily 02:00 ET)
-    └── triggers: firestore_metric_events_to_gcs
-        │                                    │
-        ▼                                    ▼
+│   └── triggers: dvc_backup_to_gcp
+├── firestore_schema_validation    (daily 02:00 ET)
+│   └── triggers: firestore_metric_events_to_gcs → GCS JSONL partitioned by day/metric
+├── flexibility_features           → data/processed/flexibility_features.parquet
+│   └── triggers: flexibility_model
+└── flexibility_model              → data/models/flexibility/
+    run_training → validate_model → rollback_check → push_to_registry
+        ↓ triggers
+    dvc_backup_to_gcp
+
 Backup DAGs
-├── dvc_backup_to_gcp              → DVC add/push raw + processed, git commit
+├── dvc_backup_to_gcp              → DVC add/push raw + processed + models, git commit
 └── firestore_metric_events_to_gcs → GCS JSONL partitioned by day/metric
-        │
-        ▼
+
 Monitoring DAGs (daily 06:00 ET)
 ├── daily_bias_monitoring          → Slack report (WISDM + weightlifting)
 └── food_bias_monitoring           → Slack report (Food-101 class/prediction bias)
 ```
 
-### Food-101 Pipeline
+---
 
-End-to-end chain triggered by a single command:
+## Flexibility Model Pipeline
+
+The flexibility model predicts a user's flexibility score at +1, +3, +7, and +14 days ahead, given their last 5 workout sessions. This is the primary ML deliverable of the project.
+
+### End-to-end flow
+
+```
+data_seeding/main.py
+  Seeds Firestore with per-session workout data
+  (exercise_type, duration, effort, sit_and_reach_cm, score_before/after, streak)
+        ↓
+flexibility_features DAG
+  download_workout_sessions   pulls flexibility_workouts subcollection from Firestore
+  build_lag_features          engineers 5-session lag features + aggregate features per user
+  join_profiles               joins age, sex, BMR from user profiles
+  quality_gate                enforces minimum row count and target coverage
+        ↓ triggers
+flexibility_model DAG
+  run_training                trains Ridge, Random Forest, XGBoost; selects winner by d7 RMSE
+  validate_model              enforces RMSE gate + Fairlearn bias check (sex, age group)
+  rollback_check              blocks deploy if new model > 10% worse than previous
+  push_to_registry            uploads model + metrics + plots to GCS model registry
+        ↓ triggers
+dvc_backup_to_gcp
+```
+
+### Feature design
+
+Each training row represents a user at reference session `t`. Features are derived from the 5 sessions immediately before `t`.
+
+**Lag features (per session, 5 lags):**
+- `score_lag_1` .. `score_lag_5` — flexibility score at that session
+- `effort_lag_1` .. `effort_lag_5` — effort level (1–5)
+- `duration_lag_1` .. `duration_lag_5` — session duration in minutes
+- `reach_lag_1` .. `reach_lag_5` — sit-and-reach measurement (cm)
+- `days_ago_lag_1` .. `days_ago_lag_5` — days before the reference session
+
+**Aggregate features:**
+- `workout_count_7d`, `workout_count_14d` — session frequency
+- `mean_score_5`, `score_trend_5` — recent score level and trajectory
+- `mean_effort_5` — recent effort consistency
+- `days_since_last`, `current_streak` — rest and consistency indicators
+
+**Profile features:**
+- `age`, `sex_encoded`, `bmr`, `age_bucket_enc`
+
+**Targets:**
+- `target_d1`, `target_d3`, `target_d7`, `target_d14` — score N days after `t`
+
+### Model training
+
+Three architectures are trained and compared on every run:
+
+| Model | Notes |
+|-------|-------|
+| Ridge regression | Linear baseline, fast |
+| Random Forest | 200 estimators, max_depth 8 |
+| XGBoost | RandomizedSearchCV, 20 iterations × 3-fold CV |
+
+The winner is selected by lowest d7 RMSE on the time-based test set (last 20% of dates). All three results are logged to MLflow for comparison.
+
+**Gate:** deployment is blocked if d7 RMSE exceeds `MODEL_RMSE_THRESHOLD` (default 10.0, configurable via Airflow Variable).
+
+### Experiment tracking (MLflow)
+
+MLflow runs at http://localhost:5001. Each training run logs:
+- Hyperparameters (best params from RandomizedSearchCV)
+- Per-horizon metrics (RMSE, MAE, R²) for all three models
+- SHAP feature importance (top 10, d7 horizon)
+- Hyperparameter sensitivity (CV correlation analysis)
+- Bias report (Fairlearn per-slice RMSE)
+- Model artifact registered as `flexibility_score_forecaster`
+
+### Model outputs
+
+After every successful training run, the following are written to `data/models/flexibility/` and uploaded to GCS:
+
+```
+data/models/flexibility/
+├── model.pkl                        winning model (MultiOutputRegressor)
+├── metrics.json                     full metrics, model comparison, SHAP, sensitivity
+├── bias_report.json                 Fairlearn per-slice RMSE (sex, age group)
+├── shap_summary.png                 SHAP beeswarm plot (d7 horizon)
+└── plots/
+    ├── 01_horizon_rmse_comparison.png   RMSE per horizon, all models
+    ├── 02_model_selection.png           RMSE + R² at d7, winner highlighted
+    ├── 03_shap_top10.png                top-10 feature importances
+    ├── 04_bias_sex.png                  per-sex RMSE vs overall
+    ├── 05_bias_age.png                  per-age-group RMSE vs overall
+    ├── 06_hyperparam_sensitivity.png    hyperparameter sensitivity
+    └── 07_score_distribution.png       target score distributions per horizon
+```
+
+### Bias detection
+
+Fairlearn slices the test set by `sex` and `age_bucket` (<20, 20–29, 30–39, 40+) and evaluates d7 RMSE per group. Groups with RMSE >50% above overall are flagged; groups >100% above block deployment.
+
+Mitigation strategies documented in `bias_report.json`:
+- Collect more data from underrepresented groups
+- Apply inverse-frequency sample weighting in XGBoost
+- Use stratified CV splits by demographic group
+
+### Rollback mechanism
+
+Before every registry push, `rollback_check` fetches `latest.json` from GCS and compares the new model's d7 RMSE against the previously deployed model. Deployment is blocked if the new model is more than 10% worse.
+
+---
+
+## CI/CD
+
+GitHub Actions workflow at `.github/workflows/flexibility_model_ci.yml` triggers on any push to `main` or `model/*` branches that touches model or feature code.
+
+### Jobs
+
+| Job | Trigger | What it does |
+|-----|---------|--------------|
+| `test` | every push | Lint (ruff) + pytest |
+| `train` | after test passes | Feature engineering, training, validation, bias check, artifact upload |
+| `deploy` | main branch only | Rollback check, GCS registry push, DVC pointer commit |
+
+### GitHub secrets required
+
+| Secret | How to generate |
+|--------|----------------|
+| `GCP_SA_KEY` | `base64 -i secrets/gcp-sa.json \| tr -d '\n'` |
+| `FIREBASE_SA_KEY` | `base64 -i secrets/firebase-admin.json \| tr -d '\n'` |
+| `KAGGLE_USERNAME` | plain text |
+| `KAGGLE_KEY` | plain text |
+| `SLACK_WEBHOOK_URL` | plain text |
+
+### GitHub variables required
+
+| Variable | Value |
+|----------|-------|
+| `GCS_BACKUP_BUCKET` | `raw_data_lvlup` |
+| `MODEL_RMSE_THRESHOLD` | `10.0` |
+
+---
+
+## Food-101 Pipeline
 
 ```
 download_food_data
@@ -189,16 +351,16 @@ clean_food_data
   build_manifest → create_splits (80/20 stratified) → class_distribution + mock_inference → quality_gate
         ↓ triggers both
 food_bias_monitoring                    dvc_backup_to_gcp
-  class_balance (imbalance ratio,         tracks data/raw + data/processed
+  class_balance (imbalance ratio,
     under/over-represented ±2σ)
   split_skew (train vs val proportions)
   prediction_bias (confidence + accuracy per class)
   → Slack report
 ```
 
-### Synthetic Data Pipeline (Firestore)
+---
 
-End-to-end chain triggered by a single command:
+## Synthetic Data Pipeline (Firestore)
 
 ```
 download_synthetic_from_firestore
@@ -224,19 +386,18 @@ dvc_backup_to_gcp
 - Preprocesses sleep: clamps hours to [2,14], parses bed/wake times, computes midpoint, satisfaction, rolling 3d/7d averages, bedtime variability
 - Preprocesses quiz: computes accuracy, filters impossible values, daily aggregation, streak tracking, INT score (accuracy × 75 + streak bonus × 25), rolling 3d/7d averages
 - Joins sleep + quiz + profiles with outer merge, adds BMR (Mifflin–St Jeor equation)
-- Generates schema report and descriptive statistics (per-column mean, std, min, max, missing %)
+- Generates schema report and descriptive statistics
 
 **Anomaly Detection & Bias** (`synthetic_anomaly_and_bias`):
 - Missingness >20% in key fields
 - Out-of-range: sleep outside [2,14]h, accuracy outside [0,1], time per question >300s
 - Negative values in sleep_hours, attempts_count, int_score, bmr
-- Bias slicing by sex and age bucket (<20, 20-29, 30-39, 40+)
-- Per-slice metrics: mean INT score, mean accuracy, mean sleep hours
-- Flags imbalanced groups with <10 samples
-- Mitigation notes: re-sampling, sample weighting, stratified splits, per-slice monitoring
+- Bias slicing by sex and age bucket (<20, 20–29, 30–39, 40+)
 - Sends Slack report with anomaly + bias summary
 
-### Data Sources
+---
+
+## Data Sources
 
 | Source | Type | DAG | Raw Location |
 |--------|------|-----|--------------|
@@ -244,94 +405,72 @@ dvc_backup_to_gcp
 | UCI WISDM | Accel txt (15.6M rows, 6 cols) | `download_wisdm_accel` | `data/raw/wisdm/` |
 | ETH Food-101 | Images (101 classes, 101k images) | `download_food_data` | `data/raw/food-101/` |
 | Firestore (synthetic) | JSON (profiles, sleep, quiz) | `download_synthetic_from_firestore` | `data/raw/*.json` |
+| Firestore (flexibility) | NoSQL (flexibility_workouts) | `flexibility_features` | Firestore subcollection |
 | Firestore (live) | NoSQL (metric_events) | `firestore_metric_events_to_gcs` | GCS bucket |
 
-### Data Cleaning
+---
+
+## Data Cleaning
 
 **Weightlifting** (`clean_weightlifting_dag.py`):
 - Schema validation (required columns: Date, Workout Name, Exercise Name, Set Order, Weight, Reps)
-- Whitespace stripping on all string columns
-- Type coercion (dates, floats, nullable ints)
-- Deduplication on natural key
-- Row-level validation: negative values, out-of-range weight (>700kg), reps (>200), set order, seconds, distance
-- Output: clean Parquet + rejection CSV with tagged reasons
-- Quality gate: blocks pipeline if rejection rate >15%
+- Type coercion, deduplication, row-level validation (negative values, out-of-range weight >700kg, reps >200)
+- Output: clean Parquet + rejection CSV; quality gate blocks if rejection rate >15%
 
 **WISDM** (`clean_wisdm_dag.py`):
-- Semicolon stripping from z-axis values
-- Type coercion for all numeric columns
-- Deduplication
-- Row validation: valid activity codes (A-S, no N), missing axes, extreme magnitude (>200)
-- 200-row windowing with mean aggregation
-- Sequential stamina computation (fatigue drain based on acceleration magnitude)
-- Anomaly detection (5σ magnitude spikes)
-- Per-activity bias analysis
+- Semicolon stripping, type coercion, deduplication
+- Row validation: valid activity codes (A–S), missing axes, extreme magnitude (>200)
+- 200-row windowing, sequential stamina computation, anomaly detection (5σ spikes)
 - Output: clean Parquet, stamina Parquet, bias JSON
 
-**Firestore Live** (`firebase_schema_validation_dag.py`):
-
 **Food-101** (`clean_food_dag.py`):
-- Builds manifest from meta/train.txt + meta/test.txt, validates image paths exist
-- Creates stratified 80/20 train/val split
-- Generates class distribution CSV
-- Runs mock Gemini inference on val set (produces predictions JSONL)
-- Quality gate: blocks if >20% images missing or <10 classes found
-- Output: manifest CSV, train/val CSVs, class distribution, predictions JSONL
+- Manifest from meta/train.txt + meta/test.txt, stratified 80/20 split
+- Mock Gemini inference on val set; quality gate blocks if >20% images missing
 
 **Firestore Live** (`firebase_schema_validation_dag.py`):
-- Validates metric_events: metric ∈ {strength, stamina, speed, flexibility, intelligence}, score ∈ [0,100], confidence ∈ [0,1], payload component keys
+- Validates metric_events: metric ∈ {strength, stamina, speed, flexibility, intelligence}, score ∈ [0,100], confidence ∈ [0,1]
 - Validates sleep_logs: sleepHours ∈ [0,24], quality ∈ [1,5], time formats
-- Validates quiz_attempts: valid topics, num_correct ≥ 0, num_correct ≤ num_questions, difficulty ∈ [1,5]
-- Configurable error threshold gate before allowing GCS export
+- Validates quiz_attempts: valid topics, num_correct ≤ num_questions, difficulty ∈ [1,5]
+- Configurable error threshold gate before GCS export
 
-### Bias Detection and Monitoring
+---
 
-The `daily_bias_monitoring` DAG runs daily and analyzes:
+## Bias Detection and Monitoring
 
-**WISDM / Stamina:**
-- Stamina distribution across all 18 activity types (mean, std, min, max)
-- Per-user stamina spread and outlier detection (>2σ from global mean)
-- Activity gap analysis (% difference between highest and lowest mean stamina)
+**Flexibility model** (via `flexibility_model` DAG):
+- Fairlearn slicing by sex and age bucket on d7 RMSE
+- Groups >50% worse flagged; groups >100% worse block deployment
+- Bias report + per-slice bar charts saved to `data/models/flexibility/plots/`
 
-**Weightlifting:**
-- Exercise volume concentration (top 5 exercises as % of total volume)
-- Weight progression trend (recent 30 days vs older data)
-- Workout frequency distribution by day of week
+**WISDM / Stamina** (via `daily_bias_monitoring`):
+- Stamina distribution across 18 activity types
+- Per-user outlier detection (>2σ from global mean)
+- Activity gap analysis
+
+**Weightlifting** (via `daily_bias_monitoring`):
+- Exercise volume concentration (top 5 as % of total)
+- Weight progression trend and workout frequency by day of week
 
 **Food-101** (via `food_bias_monitoring`):
-- Class imbalance: ratio of largest to smallest class, flags under/over-represented (±2σ)
-- Train/val split skew: per-class proportion difference between train and val sets
-- Prediction confidence bias: per-class mean confidence, flags classes <0.7
-- Per-class accuracy: worst 5 and best 5 classes
+- Class imbalance ratio, flags under/over-represented classes (±2σ)
+- Train/val split skew, prediction confidence bias per class
 - Alerts if imbalance ratio >3x, split skew >1%, or accuracy <0.8
 
 **Synthetic / Firestore** (via `synthetic_anomaly_and_bias`):
-- Slicing by sex and age bucket (<20, 20-29, 30-39, 40+)
-- Per-slice metrics: mean INT score, mean accuracy, mean sleep hours
-- Imbalance detection: flags slices with <10 samples
-- Mitigation notes: re-sampling, sample weighting, stratified splits, per-slice monitoring
+- Slicing by sex and age bucket
+- Per-slice: mean INT score, mean accuracy, mean sleep hours
+- Flags slices with <10 samples
 
-**Alert thresholds:**
-- Activity stamina gap >50%
-- Outlier users detected
-- Top 5 exercises >80% of total volume
-- Imbalanced demographic slices
-- Food class imbalance ratio >3x
-- Food train/val split skew >1%
-- Food prediction accuracy <0.8
-- Food classes with confidence <0.7
+---
 
-Reports are sent to Slack via webhook with formatted Block Kit messages.
+## Logging and Monitoring
 
-### Logging and Monitoring
-
-All DAGs use a shared `dag_monitoring.py` module providing:
-- Structured logging via `logging.getLogger("airflow.task")` (replaces all `print()` calls)
-- Task-level callbacks: `on_failure_callback`, `on_success_callback`, `on_retry_callback`
-- DAG-level callbacks: `on_dag_failure_callback`
-- SLA monitoring with `on_sla_miss_callback`
+All DAGs use `dag_monitoring.py` providing:
+- Structured logging via `logging.getLogger("airflow.task")`
+- Task callbacks: `on_failure_callback`, `on_success_callback`, `on_retry_callback`
+- DAG callbacks: `on_dag_failure_callback`, SLA monitoring
 - Slack webhook alerts on failures and SLA misses
-- `emit_metric()` — writes structured JSONL to `/opt/airflow/logs/dag_metrics/` for external scraping
+- `emit_metric()` — writes structured JSONL to `/opt/airflow/logs/dag_metrics/`
 
 | DAG | SLA Budget |
 |-----|-----------|
@@ -348,38 +487,78 @@ All DAGs use a shared `dag_monitoring.py` module providing:
 | Firestore validation | 45 min |
 | Firestore export | 60 min |
 | Daily bias monitoring | 20 min |
+| Flexibility features | 30 min |
+| Flexibility model | 90 min |
 
-### Data Versioning
+---
 
-DVC tracks `data/raw/` and `data/processed/` with a GCS remote backend. The `dvc_backup_to_gcp` DAG automates:
+## Data Versioning
+
+DVC tracks `data/raw/`, `data/processed/`, and `data/models/` with a GCS remote backend. The `dvc_backup_to_gcp` DAG automates:
 1. `dvc add data/raw` and `dvc add data/processed` (in parallel)
 2. `dvc push` to GCS
-3. `git commit` of `.dvc` files
+3. `git commit` of `.dvc` pointer files
 
-Reproducibility: clone the repo, run `dvc pull`, and all data is restored from GCS.
+The `dvc.yaml` file defines the full pipeline for local `dvc repro` execution outside of Airflow.
 
-The `dvc.yaml` file also defines the full pipeline for local `dvc repro` execution outside of Airflow.
+---
 
-### Testing
+## Testing
 
-~130 tests across 6 modules using pytest:
+~160 tests across 8 modules using pytest:
 
 | Module | Tests | Coverage |
 |--------|-------|----------|
 | `test_wisdm_loader.py` | 11 | File loading, semicolon parsing, malformed/empty files, multi-file concat |
 | `test_weightlifting_cleaning.py` | 14 | Row validation (all issue types), schema check, deduplication |
-| `test_stamina_and_anomaly.py` | 22 | Windowing (size, edge cases), stamina (monotonic decrease, floor at 0, fatigue rates), anomaly detection, WISDM row validation |
-| `test_schema_validation.py` | 20 | Firestore metric_events/sleep_logs/quiz_attempts validation, parametrized across all metrics and topics |
-| `test_synthetic_pipeline.py` | 33 | Time parsing, BMR calculation, INT score, anomaly detection, age bucketing, schema validation for profiles/sleep/quiz |
-| `test_food_pipeline.py` | 30 | Manifest building, class balance (balanced/imbalanced), split skew detection, mock inference, prediction bias, quality gate edge cases |
+| `test_stamina_and_anomaly.py` | 22 | Windowing, stamina monotonic decrease, anomaly detection, WISDM row validation |
+| `test_schema_validation.py` | 20 | Firestore metric_events/sleep_logs/quiz_attempts, parametrized across all metrics |
+| `test_synthetic_pipeline.py` | 33 | Time parsing, BMR, INT score, anomaly detection, age bucketing |
+| `test_food_pipeline.py` | 30 | Manifest, class balance, split skew, mock inference, prediction bias, quality gate |
+| `test_flexibility_features.py` | 16 | `_slope`, `_future_score`, `_bmr`, `_age_enc`, lag feature construction, days_ago ordering |
+| `test_model_train.py` | 14 | Time split, feature cols, prepare, RMSE, sensitivity, full training smoke test, gate |
 
-Run:
 ```bash
-pytest                                    # all tests
-pytest tests/test_wisdm_loader.py         # single module
-pytest -k "test_stamina"                  # by name pattern
-pytest --cov --cov-report=term-missing    # with coverage
+pytest                                        # all tests
+pytest tests/test_flexibility_features.py     # single module
+pytest tests/test_model_train.py -m "not slow" # skip slow smoke tests
+pytest -k "test_stamina"                      # by name pattern
+pytest --cov --cov-report=term-missing        # with coverage
 ```
+
+---
+
+## Project Structure
+
+```
+.
+├── .github/workflows/
+│   └── flexibility_model_ci.yml    CI/CD for flexibility model
+├── dags/
+│   ├── dag_monitoring.py           shared monitoring, callbacks, emit_metric
+│   ├── backup_dags/                dvc_backup_to_gcp, firestore_metric_events_to_gcs
+│   ├── download_dags/              kaggle, wisdm, food, synthetic, flexibility
+│   ├── monitoring_dags/            daily_bias, food_bias, synthetic_anomaly_and_bias
+│   └── processing_dags/            clean_*, firebase_schema_validation,
+│                                   flexibility_features, flexibility_model
+├── data_seeding/
+│   └── main.py                     seeds Firestore with synthetic workout data
+├── scripts/
+│   ├── model_train.py              trains Ridge/RF/XGBoost, SHAP, bias, MLflow
+│   └── generate_plots.py           generates 7 submission plots from metrics.json
+├── tests/                          pytest test suite (~160 tests)
+├── data/
+│   ├── raw/                        DVC-tracked raw data
+│   ├── processed/                  DVC-tracked processed features
+│   └── models/flexibility/         trained model, metrics, bias report, plots
+├── secrets/                        GCP + Firebase credentials (never committed)
+├── docker-compose.yml              Airflow + Postgres + MLflow
+├── Dockerfile                      Airflow image with all dependencies
+├── requirements.txt                Python dependencies
+└── dvc.yaml                        `DVC pipeline stages
+```
+
+---
 
 ## Useful Commands
 
@@ -388,14 +567,25 @@ pytest --cov --cov-report=term-missing    # with coverage
 docker exec -it airflow-scheduler bash
 airflow dags list
 airflow dags trigger <dag_id>
-airflow tasks test <dag_id> <task_id> <date>
 airflow dags list-import-errors
+airflow tasks logs <dag_id> <task_id> <run_id>
 
+# Live log monitoring
+docker exec airflow-scheduler bash -c \
+  "find /opt/airflow/logs/dag_id=flexibility_model -name '*.log' | sort | tail -1 | xargs tail -f"
 
-# Run the full synthetic pipeline end-to-end
-airflow dags trigger download_synthetic_from_firestore
-# Run the full food pipeline end-to-end
-airflow dags trigger download_food_data
+# Flexibility pipeline end-to-end
+docker exec airflow-scheduler python /opt/airflow/data_seeding/main.py \
+  --service-account /opt/airflow/secrets/firebase-admin.json \
+  --num-users 20 --days 90 --seed 42
+docker exec airflow-scheduler airflow dags trigger flexibility_features
+
+# Check model outputs
+docker exec airflow-scheduler cat /opt/airflow/data/models/flexibility/metrics.json | \
+  python -c "import json,sys; m=json.load(sys.stdin); print('Winner:', m['winner_model'], '| d7 RMSE:', m['gate_rmse'])"
+
+# Regenerate plots from existing metrics
+docker exec airflow-scheduler python /opt/airflow/scripts/generate_plots.py
 
 # DVC
 dvc status
@@ -404,9 +594,12 @@ dvc push
 dvc pull
 dvc diff
 
+# MLflow
+open http://localhost:5001
+
 # Logs
 docker compose logs -f airflow-scheduler
-docker compose logs -f postgres
+docker compose logs -f airflow-mlflow
 
 # Reset (dev only)
 docker compose down -v
