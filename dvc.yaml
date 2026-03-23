@@ -7,7 +7,7 @@
 
 stages:
 
-  #  Download
+  #  Download 
 
   download_weightlifting:
     cmd: >
@@ -28,7 +28,7 @@ stages:
           cache: true
           persist: true
 
-  #  Clean / Process
+  #  Clean / Process 
 
   clean_weightlifting:
     cmd: python scripts/clean_weightlifting.py
@@ -42,6 +42,8 @@ stages:
           cache: true
           persist: true
     metrics:
+      # summary.json lives inside weightlifting_cleaned — listed only here,
+      # not duplicated under outs, to avoid the overlap error
       - data/processed/weightlifting_cleaned/summary.json:
           cache: false
 
@@ -51,18 +53,20 @@ stages:
       - data/raw/wisdm
       - scripts/clean_wisdm.py
     outs:
-      - data/processed/wisdm:
+      # Track only the clean parquet, not the whole directory, so that
+      # compute_stamina can add its own output without an overlap error
+      - data/processed/wisdm/wisdm_accel_clean.parquet:
           cache: true
     metrics:
       - data/processed/wisdm/summary.json:
           cache: false
 
-  #  Stamina computation
+  #  Stamina computation 
 
   compute_stamina:
     cmd: python scripts/compute_stamina.py
     deps:
-      - data/processed/wisdm
+      - data/processed/wisdm/wisdm_accel_clean.parquet
       - scripts/compute_stamina.py
     outs:
       - data/processed/wisdm/wisdm_stamina.parquet:
@@ -86,18 +90,7 @@ stages:
       - data/processed/bias_reports/latest_bias.json:
           cache: false
 
-  #  Tests
-
-  run_tests:
-    cmd: pytest tests/ -v --tb=short --junitxml=data/processed/test_results.xml
-    deps:
-      - tests/
-      - data/processed/flexibility_features.parquet
-      - data/processed/wisdm
-      - data/processed/weightlifting_cleaned
-    metrics:
-      - data/processed/test_results.xml:
-          cache: false
+  #  Flexibility model 
 
   train_flexibility_model:
     cmd: python scripts/model_train.py
@@ -115,3 +108,15 @@ stages:
       - data/models/flexibility/bias_report.json:
           cache: false
 
+  #  Tests 
+
+  run_tests:
+    cmd: pytest tests/ -v --tb=short --junitxml=data/processed/test_results.xml
+    deps:
+      - tests/
+      - data/processed/flexibility_features.parquet
+      - data/processed/wisdm/wisdm_stamina.parquet
+      - data/processed/weightlifting_cleaned
+    metrics:
+      - data/processed/test_results.xml:
+          cache: false
