@@ -50,7 +50,7 @@ env:
   MODEL_RMSE_THRESHOLD: ${{ github.event.inputs.rmse_threshold || vars.MODEL_RMSE_THRESHOLD || '10.0' }}
 
 jobs:
-  #  Lint & unit tests ─
+  # ── 1. Lint & unit tests ──────────────────────────────────────────────────
   test:
     name: Lint and unit tests
     runs-on: ubuntu-latest
@@ -74,7 +74,7 @@ jobs:
       - name: Run unit tests
         run: pytest tests/ -v --tb=short -m "not slow"
 
-  #  Train, validate, bias check 
+  # ── 2. Train, validate, bias check ───────────────────────────────────────
   train:
     name: Train and validate model
     runs-on: ubuntu-latest
@@ -185,7 +185,7 @@ jobs:
               status = ":large_green_circle: PASSED" if m["passed_gate"] else ":red_circle: FAILED"
               text   = (
                   f"*Flexibility Model CI — {status}*\n"
-                  f"Commit: `${{ github.sha[:8] }}`\n"
+                  "Commit: `" + "${{ github.sha }}"[:8] + "`\n"
                   f"Winner: {m['winner_model']}\n"
                   f"Gate RMSE (d7): `{m['gate_rmse']:.4f}` (threshold `{m['rmse_threshold']}`)\n"
                   f"Bias flags: {len(m.get('bias_flagged', []))}"
@@ -199,7 +199,7 @@ jobs:
           urllib.request.urlopen(req, timeout=10)
           PYEOF
 
-  #  Push to registry (main branch only) 
+  # ── 3. Push to registry (main branch only) ───────────────────────────────
   deploy:
     name: Push to GCS model registry
     runs-on: ubuntu-latest
@@ -315,7 +315,8 @@ jobs:
           import json, os, urllib.request
           url    = os.environ["SLACK_WEBHOOK_URL"]
           status = ":rocket: Deployed" if "${{ job.status }}" == "success" else ":fire: Deploy Failed"
-          text   = f"*Flexibility Model — {status}*\nCommit: `${{ github.sha[:8] }}`"
+          sha_short = "${{ github.sha }}"[:8]
+          text   = f"*Flexibility Model — {status}*\nCommit: `{sha_short}`"
           req = urllib.request.Request(
               url, json.dumps({"text": text}).encode(),
               {"Content-Type": "application/json"}, method="POST"
