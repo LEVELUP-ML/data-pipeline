@@ -1,5 +1,5 @@
 """
-scripts/model_train.py — Flexibility score multi-step forecasting.
+scripts/model_train.py — Multi-step forecasting for flexibility and strength scores.
 
 Trains three model architectures and selects the best by d7 RMSE:
   1. Ridge regression (linear baseline)
@@ -9,7 +9,7 @@ Trains three model architectures and selects the best by d7 RMSE:
 All three results are logged to MLflow and written to metrics.json
 under "model_comparison" so generate_plots.py can visualise them.
 
-Outputs (data/models/flexibility/):
+Outputs (data/models/{model_type}/):
   model.pkl          MultiOutputRegressor(best estimator)
   metrics.json       per-model + per-horizon metrics, SHAP, sensitivity
   bias_report.json   Fairlearn slices (sex, age_bucket) on d7 horizon
@@ -62,40 +62,71 @@ except ImportError:
 
 
 AIRFLOW_HOME  = os.getenv("AIRFLOW_HOME", "/opt/airflow")
-FEATURES_PATH = Path(f"{AIRFLOW_HOME}/data/processed/flexibility_features.parquet")
-MODELS_DIR    = Path(f"{AIRFLOW_HOME}/data/models/flexibility")
-MODEL_PATH    = MODELS_DIR / "model.pkl"
-METRICS_PATH  = MODELS_DIR / "metrics.json"
-BIAS_PATH     = MODELS_DIR / "bias_report.json"
-SHAP_PATH     = MODELS_DIR / "shap_summary.png"
+
+
+def get_model_config(model_type: str):
+    """Get configuration for different model types."""
+    configs = {
+        "flexibility": {
+            "features_path": Path(f"{AIRFLOW_HOME}/data/processed/flexibility_features.parquet"),
+            "models_dir": Path(f"{AIRFLOW_HOME}/data/models/flexibility"),
+            "experiment_name": "flexibility_score_forecasting",
+            "rmse_threshold": 10.0,
+            "non_feature_cols": {"user_id", "ref_date", "ref_score", "sex_raw", "age_raw"},
+        },
+        "strength": {
+            "features_path": Path(f"{AIRFLOW_HOME}/data/processed/strength_features.parquet"),
+            "models_dir": Path(f"{AIRFLOW_HOME}/data/models/strength"),
+            "experiment_name": "strength_score_forecasting",
+            "rmse_threshold": 15.0,
+            "non_feature_cols": {"user_id", "reference_date", "age", "sex", "height_cm", "weight_kg"},
+        }
+    }
+
+    if model_type not in configs:
+        raise ValueError(f"Unknown model_type: {model_type}. Supported: {list(configs.keys())}")
+
+    return configs[model_type]
+
+
+# Global config (set by train function)
+FEATURES_PATH = None
+MODELS_DIR = None
+MODEL_PATH = None
+METRICS_PATH = None
+BIAS_PATH = None
+SHAP_PATH = None
+EXPERIMENT_NAME = None
+NON_FEATURE_COLS = None
 
 HORIZONS         = [1, 3, 7, 14]
 TARGET_COLS      = [f"target_d{h}" for h in HORIZONS]
 TEST_FRAC        = 0.20
 GATE_HORIZON     = "d7"
-NON_FEATURE_COLS = {"user_id", "ref_date", "ref_score", "sex_raw", "age_raw", *TARGET_COLS}
 
 
 def load_data():
     if not FEATURES_PATH.exists():
-        raise FileNotFoundError(f"Feature file not found: {FEATURES_PATH}\nRun flexibility_features DAG first.")
+        raise FileNotFoundError(f"Feature file not found: {FEATURES_PATH}\nRun {EXPERIMENT_NAME.split('_')[0]}_features DAG first.")
     df = pd.read_parquet(str(FEATURES_PATH))
     print(f"Loaded {len(df):,} rows, {len(df.columns)} columns")
     return df
 
 
 def time_split(df):
-    dates   = sorted(df["ref_date"].unique())
+    # Handle different date column names
+    date_col = "ref_date" if "ref_date" in df.columns else "reference_date"
+    dates   = sorted(df[date_col].unique())
     cut_idx = int(len(dates) * (1 - TEST_FRAC))
     cutoff  = dates[cut_idx]
-    train   = df[df["ref_date"] <  cutoff].copy()
-    test    = df[df["ref_date"] >= cutoff].copy()
+    train   = df[df[date_col] <  cutoff].copy()
+    test    = df[df[date_col] >= cutoff].copy()
     print(f"Train: {len(train):,} | Test: {len(test):,} | cutoff={cutoff.date()}")
     return train, test
 
 
 def get_feature_cols(df):
-    return [c for c in df.columns if c not in NON_FEATURE_COLS]
+    return [c for c in df.columns if c not in NON_FEATURE_COLS and not c.startswith("target_")]
 
 
 def prepare(df, feature_cols):
@@ -275,9 +306,22 @@ def run_shap(model, X_train, horizon_idx=2):
 
 #  Main 
 
-def train(run_id=None):
+def train(run_id=None, model_type="flexibility"):
+    # Set global config based on model type
+    global FEATURES_PATH, MODELS_DIR, MODEL_PATH, METRICS_PATH, BIAS_PATH, SHAP_PATH, EXPERIMENT_NAME, NON_FEATURE_COLS
+
+    config = get_model_config(model_type)
+    FEATURES_PATH = config["features_path"]
+    MODELS_DIR = config["models_dir"]
+    MODEL_PATH = MODELS_DIR / "model.pkl"
+    METRICS_PATH = MODELS_DIR / "metrics.json"
+    BIAS_PATH = MODELS_DIR / "bias_report.json"
+    SHAP_PATH = MODELS_DIR / "shap_summary.png"
+    EXPERIMENT_NAME = config["experiment_name"]
+    NON_FEATURE_COLS = config["non_feature_cols"] | set(TARGET_COLS)
+
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    threshold = float(os.getenv("MODEL_RMSE_THRESHOLD", "10.0"))
+    threshold = float(os.getenv("MODEL_RMSE_THRESHOLD", str(config["rmse_threshold"])))
 
     df              = load_data()
     train_df, test_df = time_split(df)
@@ -298,7 +342,7 @@ def train(run_id=None):
     if MLFLOW_OK:
         try:
             mlflow.set_tracking_uri(tracking_uri)
-            mlflow.set_experiment("flexibility_score_forecasting")
+            mlflow.set_experiment(EXPERIMENT_NAME)
             active_run = mlflow.start_run(
                 run_name=run_id or f"train_{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}"
             )
@@ -439,11 +483,12 @@ if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--run-id",         default=None)
+    p.add_argument("--model-type",     default="flexibility", choices=["flexibility", "strength"])
     p.add_argument("--rmse-threshold", type=float, default=None)
     args = p.parse_args()
     if args.rmse_threshold:
         os.environ["MODEL_RMSE_THRESHOLD"] = str(args.rmse_threshold)
-    result = train(run_id=args.run_id)
-    print("\n=== Winner model per-horizon test metrics ===")
+    result = train(run_id=args.run_id, model_type=args.model_type)
+    print(f"\n=== Winner model per-horizon test metrics for {args.model_type} ===")
     for h_key, h_m in result["test_metrics"].items():
         print(f"  +{h_key}  RMSE={h_m['rmse']:.4f}  MAE={h_m['mae']:.4f}  R2={h_m['r2']:.4f}")

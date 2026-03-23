@@ -115,3 +115,19 @@ stages:
       - data/models/flexibility/bias_report.json:
           cache: false
 
+  train_strength_model:
+    cmd: python scripts/model_train.py --model-type strength
+    deps:
+      - data/processed/strength_features.parquet
+      - scripts/model_train.py
+    outs:
+      - data/models/strength/model.pkl:
+          cache: true
+      - data/models/strength/shap_summary.png:
+          cache: true
+    metrics:
+      - data/models/strength/metrics.json:
+          cache: false
+      - data/models/strength/bias_report.json:
+          cache: false
+
