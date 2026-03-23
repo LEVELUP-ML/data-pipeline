@@ -137,8 +137,8 @@ with DAG(
 
         # Align on same labels
         all_labels = sorted(set(train_dist.index) | set(val_dist.index))
-        train_pcts = [train_dist.get(l, 0) for l in all_labels]
-        val_pcts = [val_dist.get(l, 0) for l in all_labels]
+        train_pcts = [train_dist.get(lbl, 0) for lbl in all_labels]
+        val_pcts = [val_dist.get(lbl, 0) for lbl in all_labels]
 
         # Max absolute difference in class proportions
         diffs = [abs(t - v) for t, v in zip(train_pcts, val_pcts)]

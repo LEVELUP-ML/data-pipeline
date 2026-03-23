@@ -154,7 +154,7 @@ with DAG(
         if not raw_path.exists():
             raise AirflowFailException(f"Missing: {raw_path}")
 
-        recs = [json.loads(l) for l in raw_path.read_text().splitlines() if l.strip()]
+        recs = [json.loads(line) for line in raw_path.read_text().splitlines() if line.strip()]
         df   = pd.DataFrame(recs)
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date", "user_id"]).sort_values(["user_id", "date"]).reset_index(drop=True)

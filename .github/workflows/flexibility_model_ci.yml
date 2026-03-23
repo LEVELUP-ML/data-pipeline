@@ -50,17 +50,17 @@ env:
   MODEL_RMSE_THRESHOLD: ${{ github.event.inputs.rmse_threshold || vars.MODEL_RMSE_THRESHOLD || '10.0' }}
 
 jobs:
-  # ── 1. Lint & unit tests ──────────────────────────────────────────────────
+  #  1. Lint & unit tests 
   test:
     name: Lint and unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -68,13 +68,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pytest ruff
 
+      - name: Fix lint issues
+        run: ruff check scripts/model_train.py dags/ --fix
+        
       - name: Lint (ruff)
         run: ruff check scripts/model_train.py dags/
 
       - name: Run unit tests
         run: pytest tests/ -v --tb=short -m "not slow"
 
-  # ── 2. Train, validate, bias check ───────────────────────────────────────
+  #  2. Train, validate, bias check ─
   train:
     name: Train and validate model
     runs-on: ubuntu-latest
@@ -82,10 +85,10 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -199,7 +202,7 @@ jobs:
           urllib.request.urlopen(req, timeout=10)
           PYEOF
 
-  # ── 3. Push to registry (main branch only) ───────────────────────────────
+  #  3. Push to registry (main branch only) ─
   deploy:
     name: Push to GCS model registry
     runs-on: ubuntu-latest
@@ -209,10 +212,10 @@ jobs:
     environment: production
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
