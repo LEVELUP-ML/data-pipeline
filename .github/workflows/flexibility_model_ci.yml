@@ -278,6 +278,12 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
+      - name: Configure gsutil credentials
+        run: |
+          gcloud auth activate-service-account \
+            --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
+          gcloud config set project level-up-dev-486617
+
       - name: Download model artifacts from CI job
         uses: actions/download-artifact@v4
         with:
