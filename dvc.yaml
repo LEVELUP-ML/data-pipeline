@@ -92,8 +92,26 @@ stages:
     cmd: pytest tests/ -v --tb=short --junitxml=data/processed/test_results.xml
     deps:
       - tests/
+      - data/processed/flexibility_features.parquet
       - data/processed/wisdm
       - data/processed/weightlifting_cleaned
     metrics:
       - data/processed/test_results.xml:
           cache: false
+
+  train_flexibility_model:
+    cmd: python scripts/model_train.py
+    deps:
+      - data/processed/flexibility_features.parquet
+      - scripts/model_train.py
+    outs:
+      - data/models/flexibility/model.pkl:
+          cache: true
+      - data/models/flexibility/shap_summary.png:
+          cache: true
+    metrics:
+      - data/models/flexibility/metrics.json:
+          cache: false
+      - data/models/flexibility/bias_report.json:
+          cache: false
+

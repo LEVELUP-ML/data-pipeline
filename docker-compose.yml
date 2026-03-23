@@ -33,8 +33,13 @@ x-airflow-common: &airflow-common
     AIRFLOW_VAR_MAX_DOCS_PER_RUN: "500000"
     AIRFLOW_VAR_CHUNK_SIZE: "5000"
     AIRFLOW_VAR_ALERT_WEBHOOK_URL: "https://hooks.slack.com/services/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"
+    AIRFLOW_VAR_MODEL_RMSE_THRESHOLD: "10.0"
+    AIRFLOW_VAR_BIAS_MAX_RMSE_RATIO: "2.0"
 
-  volumes: 
+    # MLflow — points to the mlflow service inside the compose network
+    MLFLOW_TRACKING_URI: "http://mlflow:5000"
+
+  volumes:
     - ./dags:/opt/airflow/dags
     - ./data:/opt/airflow/data
     - ./logs:/opt/airflow/logs
@@ -42,12 +47,14 @@ x-airflow-common: &airflow-common
     - ./.dvc:/opt/airflow/.dvc
     - ./.git:/opt/airflow/.git
     - ./secrets:/opt/airflow/secrets
+    - ./data_seeding:/opt/airflow/data_seeding
+    - ./scripts:/opt/airflow/scripts
 
   depends_on:
     postgres:
       condition: service_healthy
 
-# Services 
+# Services
 services:
   airflow-init:
     <<: *airflow-common
@@ -56,14 +63,8 @@ services:
       <<: *airflow-env
       _AIRFLOW_WWW_USER_USERNAME: admin
       _AIRFLOW_WWW_USER_PASSWORD: admin
-    command: >
-      bash -lc "
-        airflow db init &&
-        airflow users create
-          --username admin --password admin
-          --firstname Admin --lastname User
-          --role Admin --email admin@example.com || true
-      "
+    command: >-
+      bash -lc "airflow db migrate && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com"
 
   airflow-webserver:
     <<: *airflow-common
@@ -103,6 +104,28 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.11.3
+    container_name: airflow-mlflow
+    restart: unless-stopped
+    user: "1000:0"
+    volumes:
+      - ./data:/opt/airflow/data
+    ports:
+      - "5001:5000"
+    command: >-
+      mlflow server
+        --host 0.0.0.0
+        --port 5000
+        --backend-store-uri sqlite:///opt/airflow/data/models/mlflow.db
+        --default-artifact-root /opt/airflow/data/models/mlflow_artifacts
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
 volumes:
   pgdata:
