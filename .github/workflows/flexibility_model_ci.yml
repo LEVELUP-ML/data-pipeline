@@ -177,6 +177,7 @@ jobs:
 
       - name: Notify Slack — training result
         if: always() && env.SLACK_WEBHOOK_URL != ''
+        continue-on-error: true
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
@@ -314,6 +315,7 @@ jobs:
 
       - name: Notify Slack — deploy result
         if: always() && env.SLACK_WEBHOOK_URL != ''
+        continue-on-error: true
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
