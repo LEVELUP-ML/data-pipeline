@@ -20,6 +20,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
+import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import (
@@ -93,7 +94,7 @@ def main():
 
         # Generate SHAP beeswarm plot
         try:
-            fig2 = plt.figure(figsize=(12, 8))
+            plt.figure(figsize=(12, 8))
             shap.summary_plot(
                 shap_values, X_sample,
                 feature_names=feature_names,
@@ -109,7 +110,7 @@ def main():
 
         # Save report
         report = {
-            "timestamp": __import__("pandas").Timestamp.now().isoformat(),
+            "timestamp": pd.Timestamp.now().isoformat(),
             "n_samples_analyzed": len(X_sample),
             "n_features": len(feature_names),
             "feature_importance": importance_sorted,
@@ -147,7 +148,7 @@ def main():
             importance_sorted = dict(sorted(importance_dict.items(), key=lambda x: x[1], reverse=True))
 
             report = {
-                "timestamp": __import__("pandas").Timestamp.now().isoformat(),
+                "timestamp": pd.Timestamp.now().isoformat(),
                 "method": "sklearn_feature_importances",
                 "n_features": len(feature_names),
                 "feature_importance": importance_sorted,
