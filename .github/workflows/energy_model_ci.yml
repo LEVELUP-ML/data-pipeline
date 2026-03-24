@@ -302,8 +302,15 @@ jobs:
           import json, os, subprocess, sys
           from pathlib import Path
 
-          bucket = os.environ["GCS_BACKUP_BUCKET"]
-          meta   = json.loads(Path("data/models/energy/training_metadata.json").read_text())
+          # CI trains on synthetic data which is not comparable to
+          # production-trained models in the registry. Skip rollback check
+          # and let the production Airflow DAG enforce it with real data.
+          if os.environ.get("CI"):
+              print("CI environment — skipping rollback check against registry.")
+              sys.exit(0)
+
+          bucket  = os.environ["GCS_BACKUP_BUCKET"]
+          meta    = json.loads(Path("data/models/energy/training_metadata.json").read_text())
           new_mae = meta["test_mae"]
 
           result = subprocess.run(
