@@ -26,8 +26,16 @@ def _load_dag_helpers():
         "dag_monitoring":                    types.ModuleType("dag_monitoring"),
         "pendulum":                          types.ModuleType("pendulum"),
     }
-    stubs["airflow"].DAG                         = lambda *a, **k: None
-    stubs["airflow.decorators"].task             = lambda f: f
+    class _FakeDAG:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+    class _FakeTask:
+        def __rshift__(self, other): return other
+        def __rrshift__(self, other): return self
+        def __call__(self, *a, **k): return _FakeTask()
+    stubs["airflow"].DAG                         = lambda *a, **k: _FakeDAG()
+    stubs["airflow.decorators"].task             = lambda f: _FakeTask()
+    stubs["airflow.operators.trigger_dagrun"].TriggerDagRunOperator = lambda **k: _FakeTask()
     stubs["airflow.exceptions"].AirflowFailException = Exception
     stubs["airflow.models"].Variable             = type("V", (), {
         "get": staticmethod(lambda *a, **k: "")
@@ -38,7 +46,7 @@ def _load_dag_helpers():
     stubs["dag_monitoring"].monitored_dag_args   = lambda **k: {}
     stubs["dag_monitoring"].on_dag_failure_callback = None
     stubs["dag_monitoring"].on_sla_miss_callback = None
-    stubs["pendulum"].datetime                   = datetime
+    stubs["pendulum"].datetime                   = lambda *a, tz=None, **k: datetime(*a, **k)
     stubs["pendulum"].timezone                   = lambda tz: None
 
     for name, mod in stubs.items():
@@ -123,12 +131,12 @@ class TestFutureScore:
 
 class TestBmr:
     def test_male_bmr(self, dag):
-        # Mifflin-St Jeor: 10*80 + 6.25*180 - 5*30 + 5 = 1880
-        assert dag._bmr(30, "Male", 180, 80) == pytest.approx(1880, abs=2)
+        # Mifflin-St Jeor: 10*80 + 6.25*180 - 5*30 + 5 = 1780
+        assert dag._bmr(30, "Male", 180, 80) == pytest.approx(1780, abs=2)
 
     def test_female_bmr(self, dag):
-        # 10*60 + 6.25*165 - 5*25 - 161 = 1390.25
-        assert dag._bmr(25, "Female", 165, 60) == pytest.approx(1390, abs=2)
+        # 10*60 + 6.25*165 - 5*25 - 161 = 1345.25
+        assert dag._bmr(25, "Female", 165, 60) == pytest.approx(1345, abs=2)
 
     def test_invalid_inputs_return_none(self, dag):
         assert dag._bmr(None, "Male", 180, 80) is None

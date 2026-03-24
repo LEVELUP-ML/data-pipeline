@@ -97,7 +97,7 @@ METRICS_PATH = None
 BIAS_PATH = None
 SHAP_PATH = None
 EXPERIMENT_NAME = None
-NON_FEATURE_COLS = None
+NON_FEATURE_COLS = {"user_id", "ref_date", "ref_score", "sex_raw", "age_raw"}
 
 HORIZONS         = [1, 3, 7, 14]
 TARGET_COLS      = [f"target_d{h}" for h in HORIZONS]

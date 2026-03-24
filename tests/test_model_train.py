@@ -233,12 +233,16 @@ class TestTrainSmoke:
         import os
         os.environ["MODEL_RMSE_THRESHOLD"] = rmse_threshold
 
+        mock_config = {
+            "features_path": tmp_path / "flexibility_features.parquet",
+            "models_dir":    models_dir,
+            "experiment_name": "flexibility_score_forecasting",
+            "rmse_threshold":  float(rmse_threshold),
+            "non_feature_cols": {"user_id", "ref_date", "ref_score", "sex_raw", "age_raw"},
+        }
+
         with patch.object(mt, "load_data", return_value=df), \
-             patch.object(mt, "MODELS_DIR",   models_dir), \
-             patch.object(mt, "MODEL_PATH",   models_dir / "model.pkl"), \
-             patch.object(mt, "METRICS_PATH", models_dir / "metrics.json"), \
-             patch.object(mt, "BIAS_PATH",    models_dir / "bias_report.json"), \
-             patch.object(mt, "SHAP_PATH",    models_dir / "shap_summary.png"):
+             patch.object(mt, "get_model_config", return_value=mock_config):
             return mt.train(run_id="test_run"), models_dir
 
     def test_train_produces_artifacts(self, mt, tmp_path):
