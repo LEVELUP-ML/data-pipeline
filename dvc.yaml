@@ -7,7 +7,7 @@
 
 stages:
 
-  #  Download 
+  #  Download
 
   download_weightlifting:
     cmd: >
@@ -28,7 +28,7 @@ stages:
           cache: true
           persist: true
 
-  #  Clean / Process 
+  #  Clean / Process
 
   clean_weightlifting:
     cmd: python scripts/clean_weightlifting.py
@@ -42,8 +42,6 @@ stages:
           cache: true
           persist: true
     metrics:
-      # summary.json lives inside weightlifting_cleaned — listed only here,
-      # not duplicated under outs, to avoid the overlap error
       - data/processed/weightlifting_cleaned/summary.json:
           cache: false
 
@@ -53,15 +51,13 @@ stages:
       - data/raw/wisdm
       - scripts/clean_wisdm.py
     outs:
-      # Track only the clean parquet, not the whole directory, so that
-      # compute_stamina can add its own output without an overlap error
       - data/processed/wisdm/wisdm_accel_clean.parquet:
           cache: true
     metrics:
       - data/processed/wisdm/summary.json:
           cache: false
 
-  #  Stamina computation 
+  #  Stamina computation
 
   compute_stamina:
     cmd: python scripts/compute_stamina.py
@@ -75,7 +71,7 @@ stages:
       - data/processed/wisdm/stamina_metrics.json:
           cache: false
 
-  #  Bias analysis 
+  #  Bias analysis
 
   bias_analysis:
     cmd: python scripts/bias_analysis.py
@@ -90,10 +86,10 @@ stages:
       - data/processed/bias_reports/latest_bias.json:
           cache: false
 
-  #  Flexibility model 
+  #  Flexibility model
 
   train_flexibility_model:
-    cmd: python scripts/model_train.py
+    cmd: python scripts/model_train.py --model-type flexibility
     deps:
       - data/processed/flexibility_features.parquet
       - scripts/model_train.py
@@ -108,7 +104,34 @@ stages:
       - data/models/flexibility/bias_report.json:
           cache: false
 
-  #  Tests 
+  #  Strength features + model
+
+  strength_features:
+    cmd: python scripts/model_train.py --model-type strength --rmse-threshold 999
+    deps:
+      - data/processed/weightlifting_cleaned
+      - dags/processing_dags/strength_features_dag.py
+    outs:
+      - data/processed/strength_features.parquet:
+          cache: true
+
+  train_strength_model:
+    cmd: python scripts/model_train.py --model-type strength
+    deps:
+      - data/processed/strength_features.parquet
+      - scripts/model_train.py
+    outs:
+      - data/models/strength/model.pkl:
+          cache: true
+      - data/models/strength/shap_summary.png:
+          cache: true
+    metrics:
+      - data/models/strength/metrics.json:
+          cache: false
+      - data/models/strength/bias_report.json:
+          cache: false
+
+  #  Tests
 
   run_tests:
     cmd: pytest tests/ -v --tb=short --junitxml=data/processed/test_results.xml

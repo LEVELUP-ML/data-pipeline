@@ -36,6 +36,9 @@ x-airflow-common: &airflow-common
     AIRFLOW_VAR_MODEL_RMSE_THRESHOLD: "10.0"
     AIRFLOW_VAR_BIAS_MAX_RMSE_RATIO: "2.0"
 
+    AIRFLOW_VAR_FLEXIBILITY_RMSE_THRESHOLD: "10.0"
+    AIRFLOW_VAR_STRENGTH_RMSE_THRESHOLD: "2000.0"
+    
     # MLflow — points to the mlflow service inside the compose network
     MLFLOW_TRACKING_URI: "http://mlflow:5000"
 

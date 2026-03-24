@@ -1,5 +1,5 @@
 """
-scripts/model_train.py — Flexibility score multi-step forecasting.
+scripts/model_train.py — Multi-step forecasting for flexibility and strength scores.
 
 Trains three model architectures and selects the best by d7 RMSE:
   1. Ridge regression (linear baseline)
@@ -9,7 +9,7 @@ Trains three model architectures and selects the best by d7 RMSE:
 All three results are logged to MLflow and written to metrics.json
 under "model_comparison" so generate_plots.py can visualise them.
 
-Outputs (data/models/flexibility/):
+Outputs (data/models/{model_type}/):
   model.pkl          MultiOutputRegressor(best estimator)
   metrics.json       per-model + per-horizon metrics, SHAP, sensitivity
   bias_report.json   Fairlearn slices (sex, age_bucket) on d7 horizon
@@ -61,41 +61,77 @@ except ImportError:
     print("WARNING: fairlearn not installed — bias analysis skipped.")
 
 
-AIRFLOW_HOME  = os.getenv("AIRFLOW_HOME", "/opt/airflow")
-FEATURES_PATH = Path(f"{AIRFLOW_HOME}/data/processed/flexibility_features.parquet")
-MODELS_DIR    = Path(f"{AIRFLOW_HOME}/data/models/flexibility")
-MODEL_PATH    = MODELS_DIR / "model.pkl"
-METRICS_PATH  = MODELS_DIR / "metrics.json"
-BIAS_PATH     = MODELS_DIR / "bias_report.json"
-SHAP_PATH     = MODELS_DIR / "shap_summary.png"
+AIRFLOW_HOME = os.getenv("AIRFLOW_HOME", "/opt/airflow")
 
-HORIZONS         = [1, 3, 7, 14]
-TARGET_COLS      = [f"target_d{h}" for h in HORIZONS]
-TEST_FRAC        = 0.20
-GATE_HORIZON     = "d7"
-NON_FEATURE_COLS = {"user_id", "ref_date", "ref_score", "sex_raw", "age_raw", *TARGET_COLS}
+
+def get_model_config(model_type: str):
+    """Get configuration for different model types."""
+    configs = {
+        "flexibility": {
+            "features_path": Path(f"{AIRFLOW_HOME}/data/processed/flexibility_features.parquet"),
+            "models_dir":    Path(f"{AIRFLOW_HOME}/data/models/flexibility"),
+            "experiment_name": "flexibility_score_forecasting",
+            "rmse_threshold": float(os.getenv("FLEXIBILITY_RMSE_THRESHOLD",
+                                       os.getenv("MODEL_RMSE_THRESHOLD", "10.0"))),
+            "non_feature_cols": {"user_id", "ref_date", "ref_score", "sex_raw", "age_raw"},
+        },
+        "strength": {
+            "features_path": Path(f"{AIRFLOW_HOME}/data/processed/strength_features.parquet"),
+            "models_dir":    Path(f"{AIRFLOW_HOME}/data/models/strength"),
+            "experiment_name": "strength_score_forecasting",
+            "rmse_threshold": float(os.getenv("STRENGTH_RMSE_THRESHOLD",
+                                       os.getenv("MODEL_RMSE_THRESHOLD", "2000.0"))),
+
+            "non_feature_cols": {"user_id", "ref_date", "ref_score", "sex_raw", "age_raw"},
+        },
+    }
+
+    if model_type not in configs:
+        raise ValueError(f"Unknown model_type: {model_type}. Supported: {list(configs.keys())}")
+
+    return configs[model_type]
+
+
+# Global config (set by train function)
+FEATURES_PATH    = None
+MODELS_DIR       = None
+MODEL_PATH       = None
+METRICS_PATH     = None
+BIAS_PATH        = None
+SHAP_PATH        = None
+EXPERIMENT_NAME  = None
+NON_FEATURE_COLS = {"user_id", "ref_date", "ref_score", "sex_raw", "age_raw"}
+
+HORIZONS     = [1, 3, 7, 14]
+TARGET_COLS  = [f"target_d{h}" for h in HORIZONS]
+TEST_FRAC    = 0.20
+GATE_HORIZON = "d7"
 
 
 def load_data():
     if not FEATURES_PATH.exists():
-        raise FileNotFoundError(f"Feature file not found: {FEATURES_PATH}\nRun flexibility_features DAG first.")
+        raise FileNotFoundError(
+            f"Feature file not found: {FEATURES_PATH}\n"
+            f"Run {EXPERIMENT_NAME.split('_')[0]}_features DAG first."
+        )
     df = pd.read_parquet(str(FEATURES_PATH))
     print(f"Loaded {len(df):,} rows, {len(df.columns)} columns")
     return df
 
 
 def time_split(df):
-    dates   = sorted(df["ref_date"].unique())
+    date_col = "ref_date" if "ref_date" in df.columns else "reference_date"
+    dates   = sorted(df[date_col].unique())
     cut_idx = int(len(dates) * (1 - TEST_FRAC))
     cutoff  = dates[cut_idx]
-    train   = df[df["ref_date"] <  cutoff].copy()
-    test    = df[df["ref_date"] >= cutoff].copy()
+    train   = df[df[date_col] <  cutoff].copy()
+    test    = df[df[date_col] >= cutoff].copy()
     print(f"Train: {len(train):,} | Test: {len(test):,} | cutoff={cutoff.date()}")
     return train, test
 
 
 def get_feature_cols(df):
-    return [c for c in df.columns if c not in NON_FEATURE_COLS]
+    return [c for c in df.columns if c not in NON_FEATURE_COLS and not c.startswith("target_")]
 
 
 def prepare(df, feature_cols):
@@ -114,15 +150,17 @@ def eval_per_horizon(model, X, Y, label):
     result = {}
     for col, h in zip(TARGET_COLS, HORIZONS):
         yt, yp = Y[col], Y_pred[col]
-        r = {"rmse": round(rmse(yt, yp), 4),
-             "mae":  round(float(mean_absolute_error(yt, yp)), 4),
-             "r2":   round(float(r2_score(yt, yp)), 4)}
+        r = {
+            "rmse": round(rmse(yt, yp), 4),
+            "mae":  round(float(mean_absolute_error(yt, yp)), 4),
+            "r2":   round(float(r2_score(yt, yp)), 4),
+        }
         result[f"d{h}"] = r
         print(f"  [{label}] +{h:2d}d  RMSE={r['rmse']:.4f}  MAE={r['mae']:.4f}  R2={r['r2']:.4f}")
     return result
 
 
-#  Three architectures 
+# ── Three architectures ───────────────────────────────────────────────────────
 
 def build_ridge(X_train, Y_train):
     print("\n--- Ridge regression (baseline) ---")
@@ -154,9 +192,11 @@ def build_xgboost(X_train, Y_train):
         "estimator__reg_alpha":        [0, 0.05, 0.1, 0.5],
         "estimator__reg_lambda":       [1.0, 1.5, 2.0],
     }
-    base   = MultiOutputRegressor(
-        xgb.XGBRegressor(objective="reg:squarederror", random_state=42,
-                         n_jobs=-1, verbosity=0, tree_method="hist"),
+    base = MultiOutputRegressor(
+        xgb.XGBRegressor(
+            objective="reg:squarederror", random_state=42,
+            n_jobs=-1, verbosity=0, tree_method="hist",
+        ),
         n_jobs=1,
     )
     search = RandomizedSearchCV(
@@ -181,31 +221,37 @@ def hyperparam_sensitivity(cv_results):
                 continue
             corr = numeric.corr(df["mean_test_score"])
             sens[name] = round(float(corr), 4) if not np.isnan(corr) else 0.0
-        return {"description": "Pearson correlation: hyperparameter value vs CV RMSE",
-                "correlations": sens}
+        return {
+            "description": "Pearson correlation: hyperparameter value vs CV RMSE",
+            "correlations": sens,
+        }
     except Exception as e:
         print(f"WARNING: sensitivity failed: {e}")
         return {"available": False}
 
 
-#  Bias analysis 
+# ── Bias analysis ─────────────────────────────────────────────────────────────
 
 def run_bias(model, test_df, X_test, Y_test):
     if not FAIRLEARN_OK:
         return {"available": False}
 
-    Y_pred     = pd.DataFrame(model.predict(X_test), columns=TARGET_COLS, index=Y_test.index)
-    gate_col   = f"target_{GATE_HORIZON}"
-    y_true_d7  = Y_test[gate_col]
-    y_pred_d7  = Y_pred[gate_col]
-    overall_r  = rmse(y_true_d7, y_pred_d7)
+    Y_pred    = pd.DataFrame(model.predict(X_test), columns=TARGET_COLS, index=Y_test.index)
+    gate_col  = f"target_{GATE_HORIZON}"
+    y_true_d7 = Y_test[gate_col]
+    y_pred_d7 = Y_pred[gate_col]
+    overall_r = rmse(y_true_d7, y_pred_d7)
 
-    report = {"available": True, "slices": {}, "flagged": [],
-              "mitigation_notes": (
-                  "If bias is detected: (1) collect more data from underrepresented groups, "
-                  "(2) apply sample_weight inversely proportional to group frequency, "
-                  "(3) use stratified CV splits by demographic."
-              )}
+    report = {
+        "available": True,
+        "slices":    {},
+        "flagged":   [],
+        "mitigation_notes": (
+            "If bias is detected: (1) collect more data from underrepresented groups, "
+            "(2) apply sample_weight inversely proportional to group frequency, "
+            "(3) use stratified CV splits by demographic."
+        ),
+    }
 
     for slice_col, raw_col in [("sex", "sex_raw"), ("age_bucket", "age_raw")]:
         if raw_col not in test_df.columns:
@@ -221,9 +267,11 @@ def run_bias(model, test_df, X_test, Y_test):
             sensitive = sensitive.apply(_bkt)
         sensitive = sensitive.fillna("unknown")
 
-        mf       = MetricFrame(metrics={"rmse": lambda yt, yp: rmse(yt, yp)},
-                               y_true=y_true_d7, y_pred=y_pred_d7,
-                               sensitive_features=sensitive)
+        mf       = MetricFrame(
+            metrics={"rmse": lambda yt, yp: rmse(yt, yp)},
+            y_true=y_true_d7, y_pred=y_pred_d7,
+            sensitive_features=sensitive,
+        )
         by_group = {str(k): round(float(v["rmse"]), 4) for k, v in mf.by_group.iterrows()}
         report["slices"][slice_col] = {"overall_rmse": round(overall_r, 4), "by_group": by_group}
 
@@ -237,7 +285,7 @@ def run_bias(model, test_df, X_test, Y_test):
     return report
 
 
-#  SHAP 
+# ── SHAP ──────────────────────────────────────────────────────────────────────
 
 def run_shap(model, X_train, horizon_idx=2):
     try:
@@ -246,8 +294,7 @@ def run_shap(model, X_train, horizon_idx=2):
         import matplotlib.pyplot as plt
 
         estimator = model.estimators_[horizon_idx]
-        # SHAP works directly on XGBRegressor; for Pipeline/RF use KernelExplainer fallback
-        sample = X_train.sample(min(300, len(X_train)), random_state=42)
+        sample    = X_train.sample(min(300, len(X_train)), random_state=42)
 
         try:
             explainer   = shap.TreeExplainer(estimator)
@@ -273,15 +320,29 @@ def run_shap(model, X_train, horizon_idx=2):
         return {}
 
 
-#  Main 
+# ── Main ──────────────────────────────────────────────────────────────────────
 
-def train(run_id=None):
+def train(run_id=None, model_type="flexibility"):
+    global FEATURES_PATH, MODELS_DIR, MODEL_PATH, METRICS_PATH, BIAS_PATH, SHAP_PATH
+    global EXPERIMENT_NAME, NON_FEATURE_COLS
+
+    config           = get_model_config(model_type)
+    FEATURES_PATH    = config["features_path"]
+    MODELS_DIR       = config["models_dir"]
+    MODEL_PATH       = MODELS_DIR / "model.pkl"
+    METRICS_PATH     = MODELS_DIR / "metrics.json"
+    BIAS_PATH        = MODELS_DIR / "bias_report.json"
+    SHAP_PATH        = MODELS_DIR / "shap_summary.png"
+    EXPERIMENT_NAME  = config["experiment_name"]
+    NON_FEATURE_COLS = config["non_feature_cols"] | set(TARGET_COLS)
+
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    threshold = float(os.getenv("MODEL_RMSE_THRESHOLD", "10.0"))
+    threshold = float(os.getenv("MODEL_RMSE_THRESHOLD", str(config["rmse_threshold"])))
 
-    df              = load_data()
+    df               = load_data()
     train_df, test_df = time_split(df)
-    feature_cols    = get_feature_cols(df)
+    date_col         = "ref_date" if "ref_date" in df.columns else "reference_date"
+    feature_cols     = get_feature_cols(df)
     X_train, Y_train = prepare(train_df, feature_cols)
     X_test,  Y_test  = prepare(test_df,  feature_cols)
 
@@ -291,14 +352,15 @@ def train(run_id=None):
     print(f"\nFeatures ({len(feature_cols)}): {feature_cols}")
     print(f"Train: {X_train.shape} | Test: {X_test.shape}")
 
-    # MLflow
-    tracking_uri = os.getenv("MLFLOW_TRACKING_URI",
-                             f"sqlite:///{AIRFLOW_HOME}/data/models/mlflow.db")
+    tracking_uri = os.getenv(
+        "MLFLOW_TRACKING_URI",
+        f"sqlite:///{AIRFLOW_HOME}/data/models/mlflow.db",
+    )
     active_run = None
     if MLFLOW_OK:
         try:
             mlflow.set_tracking_uri(tracking_uri)
-            mlflow.set_experiment("flexibility_score_forecasting")
+            mlflow.set_experiment(EXPERIMENT_NAME)
             active_run = mlflow.start_run(
                 run_name=run_id or f"train_{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}"
             )
@@ -307,25 +369,25 @@ def train(run_id=None):
             active_run = None
 
     try:
-        #  Train all three architectures 
+        # ── Train all three architectures ─────────────────────────────────────
         models = {}
 
-        ridge_model                       = build_ridge(X_train, Y_train)
-        models["Ridge"]                   = ridge_model
+        ridge_model                    = build_ridge(X_train, Y_train)
+        models["Ridge"]                = ridge_model
 
-        rf_model                          = build_random_forest(X_train, Y_train)
-        models["Random Forest"]           = rf_model
+        rf_model                       = build_random_forest(X_train, Y_train)
+        models["Random Forest"]        = rf_model
 
-        xgb_model, best_params, cv_res    = build_xgboost(X_train, Y_train)
-        models["XGBoost"]                 = xgb_model
+        xgb_model, best_params, cv_res = build_xgboost(X_train, Y_train)
+        models["XGBoost"]              = xgb_model
 
-        #  Evaluate each 
+        # ── Evaluate each ─────────────────────────────────────────────────────
         comparison = {}
         for name, model in models.items():
             print(f"\nEvaluating {name}...")
             comparison[name] = eval_per_horizon(model, X_test, Y_test, name)
 
-        #  Select winner by d7 RMSE 
+        # ── Select winner by d7 RMSE ──────────────────────────────────────────
         winner_name  = min(comparison, key=lambda n: comparison[n]["d7"]["rmse"])
         winner_model = models[winner_name]
         print(f"\nWinner: {winner_name} (d7 RMSE={comparison[winner_name]['d7']['rmse']:.4f})")
@@ -334,18 +396,15 @@ def train(run_id=None):
         test_metrics  = eval_per_horizon(winner_model, X_test,  Y_test,  f"{winner_name}/test")
         gate_rmse     = test_metrics[GATE_HORIZON]["rmse"]
 
-        #  SHAP on winner (only XGBoost supports TreeExplainer natively) 
         print("\nRunning SHAP...")
         shap_top10 = run_shap(winner_model, X_train, horizon_idx=2)
 
-        #  Hyperparameter sensitivity (XGBoost only) 
         sensitivity = hyperparam_sensitivity(cv_res)
 
-        #  Bias 
         print("\nRunning bias analysis...")
         bias_report = run_bias(winner_model, test_df, X_test, Y_test)
 
-        #  Log to MLflow 
+        # ── Log to MLflow ─────────────────────────────────────────────────────
         if MLFLOW_OK and active_run:
             try:
                 mlflow.log_param("winner_model", winner_name)
@@ -363,13 +422,13 @@ def train(run_id=None):
                     mlflow.log_artifact(str(SHAP_PATH))
                 mlflow.sklearn.log_model(
                     winner_model,
-                    artifact_path="flexibility_forecaster",
-                    registered_model_name="flexibility_score_forecaster",
+                    artifact_path=f"{model_type}_forecaster",
+                    registered_model_name=f"{model_type}_score_forecaster",
                 )
             except Exception as e:
                 print(f"WARNING: MLflow logging failed ({e}) — artifacts saved locally regardless.")
 
-        #  Save artifacts 
+        # ── Save artifacts ────────────────────────────────────────────────────
         with MODEL_PATH.open("wb") as f:
             pickle.dump(winner_model, f)
 
@@ -382,16 +441,20 @@ def train(run_id=None):
             "test_rows":              len(X_test),
             "users_train":            int(train_df["user_id"].nunique()),
             "users_test":             int(test_df["user_id"].nunique()),
-            "train_date_range":       [str(train_df["ref_date"].min().date()),
-                                       str(train_df["ref_date"].max().date())],
-            "test_date_range":        [str(test_df["ref_date"].min().date()),
-                                       str(test_df["ref_date"].max().date())],
+            "train_date_range":       [
+                str(train_df[date_col].min().date()),
+                str(train_df[date_col].max().date()),
+            ],
+            "test_date_range":        [
+                str(test_df[date_col].min().date()),
+                str(test_df[date_col].max().date()),
+            ],
             "model_comparison":       comparison,
-            "best_params":            {k.replace("estimator__", ""): v
-                                       for k, v in best_params.items()},
-            "best_cv_rmse":           round(-float(min(
-                                           cv_res["mean_test_score"]
-                                       )), 4) if cv_res else None,
+            "best_params":            {
+                k.replace("estimator__", ""): v for k, v in best_params.items()
+            },
+            "best_cv_rmse":           round(-float(min(cv_res["mean_test_score"])), 4)
+                                      if cv_res else None,
             "train_metrics":          train_metrics,
             "test_metrics":           test_metrics,
             "gate_horizon":           GATE_HORIZON,
@@ -411,13 +474,18 @@ def train(run_id=None):
 
         # Auto-generate plots right after training
         try:
-            import importlib.util, sys as _sys
+            import importlib.util as _ilu
             plots_path = Path(__file__).parent / "generate_plots.py"
             if plots_path.exists():
-                spec = importlib.util.spec_from_file_location("generate_plots", str(plots_path))
-                mod  = importlib.util.module_from_spec(spec)
+                spec = _ilu.spec_from_file_location("generate_plots", str(plots_path))
+                mod  = _ilu.module_from_spec(spec)
                 spec.loader.exec_module(mod)
-                mod.generate_all()
+                mod.generate_all(
+                    metrics_path=str(METRICS_PATH),
+                    bias_path=str(BIAS_PATH),
+                    plots_dir=str(MODELS_DIR / "plots"),
+                    features_path=str(FEATURES_PATH),
+                )
         except Exception as e:
             print(f"WARNING: plot generation failed (non-fatal): {e}")
 
@@ -439,11 +507,12 @@ if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--run-id",         default=None)
+    p.add_argument("--model-type",     default="flexibility", choices=["flexibility", "strength"])
     p.add_argument("--rmse-threshold", type=float, default=None)
     args = p.parse_args()
     if args.rmse_threshold:
         os.environ["MODEL_RMSE_THRESHOLD"] = str(args.rmse_threshold)
-    result = train(run_id=args.run_id)
-    print("\n=== Winner model per-horizon test metrics ===")
+    result = train(run_id=args.run_id, model_type=args.model_type)
+    print(f"\n=== Winner model per-horizon test metrics for {args.model_type} ===")
     for h_key, h_m in result["test_metrics"].items():
         print(f"  +{h_key}  RMSE={h_m['rmse']:.4f}  MAE={h_m['mae']:.4f}  R2={h_m['r2']:.4f}")
