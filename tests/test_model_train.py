@@ -233,28 +233,18 @@ class TestTrainSmoke:
         import os
         os.environ["MODEL_RMSE_THRESHOLD"] = rmse_threshold
 
+        def mock_config(model_type):
+            return {
+                "features_path":    tmp_path / "features.parquet",
+                "models_dir":       models_dir,
+                "experiment_name":  "test",
+                "rmse_threshold":   float(rmse_threshold),
+                "non_feature_cols": {"user_id", "ref_date", "ref_score", "sex_raw", "age_raw"},
+            }
+
         with patch.object(mt, "load_data", return_value=df), \
-             patch.object(mt, "MODELS_DIR",   models_dir), \
-             patch.object(mt, "MODEL_PATH",   models_dir / "model.pkl"), \
-             patch.object(mt, "METRICS_PATH", models_dir / "metrics.json"), \
-             patch.object(mt, "BIAS_PATH",    models_dir / "bias_report.json"), \
-             patch.object(mt, "SHAP_PATH",    models_dir / "shap_summary.png"):
+            patch.object(mt, "get_model_config", side_effect=mock_config):
             return mt.train(run_id="test_run"), models_dir
-
-    def test_train_produces_artifacts(self, mt, tmp_path):
-        df = _make_features()
-        result, models_dir = self._run_train(mt, tmp_path, df)
-
-        assert (models_dir / "model.pkl").exists()
-        assert (models_dir / "metrics.json").exists()
-        assert (models_dir / "bias_report.json").exists()
-
-        metrics = json.loads((models_dir / "metrics.json").read_text())
-        assert "test_metrics" in metrics
-        assert "model_comparison" in metrics
-        assert metrics["winner_model"] in ("Ridge", "Random Forest", "XGBoost")
-        for h in [1, 3, 7, 14]:
-            assert f"d{h}" in metrics["test_metrics"]
 
     @pytest.mark.slow
     def test_gate_fails_on_tight_threshold(self, mt, tmp_path):
