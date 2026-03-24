@@ -33,6 +33,28 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 
+def _make_explainer(model, X_sample):
+    """
+    Create a SHAP TreeExplainer, working around the XGBoost base_score
+    string format bug present in some SHAP/XGBoost version combinations.
+    """
+    import shap
+
+    try:
+        return shap.TreeExplainer(model)
+    except ValueError as e:
+        if "base_score" not in str(e):
+            raise
+        log.warning("SHAP/XGBoost base_score incompatibility — retrying with data argument")
+
+    # Passing data bypasses the base_score parsing path
+    try:
+        return shap.TreeExplainer(model, data=X_sample, feature_perturbation="interventional")
+    except Exception as e2:
+        log.warning("TreeExplainer with data also failed: %s", e2)
+        raise
+
+
 def main():
     """Run SHAP sensitivity analysis."""
     ensure_dirs()
@@ -48,9 +70,6 @@ def main():
     try:
         import shap
 
-        # Use TreeExplainer for tree-based models
-        explainer = shap.TreeExplainer(model)
-
         # Sample data if too large (SHAP can be slow)
         if len(X) > 1000:
             idx = np.random.RandomState(42).choice(len(X), 1000, replace=False)
@@ -58,6 +77,7 @@ def main():
         else:
             X_sample = X
 
+        explainer = _make_explainer(model, X_sample)
         shap_values = explainer.shap_values(X_sample)
         log.info("SHAP values computed successfully")
 
