@@ -34,23 +34,23 @@ log = logging.getLogger(__name__)
 
 
 def _make_explainer(model, X_sample):
-    """
-    Create a SHAP TreeExplainer, working around the XGBoost base_score
-    string format bug present in some SHAP/XGBoost version combinations.
-    """
     import shap
 
+    # Patch XGBoost base_score if it's stored in a format SHAP can't parse
+    # e.g. '[5.4755775E1]' — known bug in SHAP with certain XGBoost versions
     try:
-        return shap.TreeExplainer(model)
-    except (ValueError, TypeError):
-        log.warning("SHAP TreeExplainer failed — retrying with data argument")
+        import xgboost
+        if isinstance(model, xgboost.XGBRegressor):
+            booster = model.get_booster()
+            config = json.loads(booster.save_config())
+            raw = config["learner"]["learner_model_param"]["base_score"]
+            # Strip brackets and parse scientific notation
+            cleaned = raw.strip("[]")
+            booster.set_param("base_score", str(float(cleaned)))
+    except Exception as patch_err:
+        log.warning("Could not patch XGBoost base_score: %s", patch_err)
 
-    # Passing data bypasses the base_score parsing path
-    try:
-        return shap.TreeExplainer(model, data=X_sample, feature_perturbation="interventional")
-    except Exception as e2:
-        log.warning("TreeExplainer with data also failed: %s", e2)
-        raise
+    return shap.TreeExplainer(model)
 
 def main():
     """Run SHAP sensitivity analysis."""
