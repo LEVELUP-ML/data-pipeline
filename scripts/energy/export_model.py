@@ -96,7 +96,6 @@ def export_random_forest(model, feature_names, metadata):
 def export_xgboost(model, feature_names, metadata):
     """Export an XGBoost model to JSON format using its booster."""
     try:
-        # XGBoost models have get_booster() which can dump trees
         booster = model.get_booster()
         dump = booster.get_dump(dump_format="json")
 
@@ -105,18 +104,50 @@ def export_xgboost(model, feature_names, metadata):
             tree_dict = json.loads(tree_str)
             trees_json.append(_convert_xgb_node(tree_dict))
 
+        params = model.get_params()
+
+        # max_depth and learning_rate may be None when using XGBoost defaults
+        max_depth = params.get("max_depth")
+        if max_depth is None:
+            try:
+                config = json.loads(booster.save_config())
+                max_depth = int(
+                    config["learner"]["gradient_booster"]
+                          ["tree_train_param"]["max_depth"]
+                )
+            except Exception:
+                max_depth = 6
+
+        learning_rate = params.get("learning_rate")
+        if learning_rate is None:
+            try:
+                config = json.loads(booster.save_config())
+                learning_rate = float(
+                    config["learner"]["gradient_booster"]
+                          ["tree_train_param"].get("eta", 0.3)
+                )
+            except Exception:
+                learning_rate = 0.3
+
+        # base_score may be a bracketed string e.g. '[5.47E1]' — always use 0.5 as fallback
+        try:
+            raw_base = params.get("base_score")
+            base_score = float(str(raw_base).strip("[]")) if raw_base is not None else 0.5
+        except (ValueError, TypeError):
+            base_score = 0.5
+
         weights = {
             "type": "xgboost",
             "n_trees": len(dump),
-            "max_depth": model.max_depth,
+            "max_depth": int(max_depth),
             "feature_names": feature_names,
             "target": "energy_score",
             "target_range": [0, 100],
             "training_samples": metadata.get("train_samples", 0),
             "in_sample_mae": metadata.get("test_mae", 0),
             "in_sample_rmse": metadata.get("test_rmse", 0),
-            "learning_rate": model.learning_rate,
-            "base_score": float(model.get_params().get("base_score", 0.5)),
+            "learning_rate": float(learning_rate),
+            "base_score": base_score,
             "trees": trees_json,
         }
         return weights
@@ -180,11 +211,8 @@ def main():
         log.error("Export failed")
         sys.exit(1)
 
-    # Save to ML-Pipeline
     MODEL_WEIGHTS_JSON.write_text(json.dumps(weights))
     log.info("Exported model → %s (%d trees)", MODEL_WEIGHTS_JSON, weights["n_trees"])
-
-    # App deployment is handled separately outside this repo.
 
     log.info("✅ Model export complete")
     return weights
