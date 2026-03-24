@@ -27,12 +27,10 @@ Usage:
 
 import json
 import logging
-import shutil
 import sys
 from pathlib import Path
 
 import joblib
-import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import (

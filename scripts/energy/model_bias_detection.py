@@ -22,8 +22,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import (
-    BEST_MODEL_PATH, BIAS_DETECTION_REPORT, DAILY_JOINED,
-    FEATURE_COLUMNS, TARGET_COLUMN, AGE_BINS,
+    BEST_MODEL_PATH, BIAS_DETECTION_REPORT, AGE_BINS,
     MLFLOW_TRACKING_URI, MLFLOW_EXPERIMENT_NAME, ensure_dirs,
 )
 from train_model import load_and_prepare_data

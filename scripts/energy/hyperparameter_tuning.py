@@ -16,14 +16,13 @@ from pathlib import Path
 
 import mlflow
 import numpy as np
-import pandas as pd
 from scipy.stats import randint, uniform
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import RandomizedSearchCV
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import (
-    DAILY_JOINED, MODELS_DIR, MLFLOW_TRACKING_URI,
+    MODELS_DIR, MLFLOW_TRACKING_URI,
     MLFLOW_EXPERIMENT_NAME, ensure_dirs,
 )
 from train_model import load_and_prepare_data

@@ -22,6 +22,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
+import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -60,7 +61,6 @@ def compute_metrics(y_true, y_pred):
 
 def generate_plots(y_true, y_pred):
     """Generate validation diagnostic plots."""
-    # 1. Actual vs Predicted scatter
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
     ax1 = axes[0]
@@ -73,7 +73,6 @@ def generate_plots(y_true, y_pred):
     ax1.set_xlim(0, 100)
     ax1.set_ylim(0, 100)
 
-    # 2. Residual distribution
     residuals = y_true - y_pred
     ax2 = axes[1]
     ax2.hist(residuals, bins=40, color="#5CB85C", edgecolor="white", alpha=0.8)
@@ -95,30 +94,24 @@ def main():
     """Run model validation with gates."""
     ensure_dirs()
 
-    # Setup MLflow
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     mlflow.set_experiment(MLFLOW_EXPERIMENT_NAME)
 
-    # Load model and test data
     log.info("Loading model from %s", BEST_MODEL_PATH)
     model = joblib.load(BEST_MODEL_PATH)
     X_test, y_test, feature_names = load_test_data()
 
     log.info("Validating on %d test samples", len(X_test))
 
-    # Predict
     y_pred = model.predict(X_test)
 
-    # Compute metrics
     metrics = compute_metrics(y_test, y_pred)
     log.info("Validation Metrics:")
     for k, v in metrics.items():
         log.info("  %s: %.4f", k, v)
 
-    # Generate plots
     plot_path = generate_plots(y_test, y_pred)
 
-    # Validation gates
     gates = {
         "mae_gate": {
             "threshold": MAX_ACCEPTABLE_MAE,
@@ -134,7 +127,6 @@ def main():
 
     all_passed = all(g["passed"] for g in gates.values())
 
-    # Build report
     report = {
         "status": "PASS" if all_passed else "FAIL",
         "metrics": metrics,
@@ -142,18 +134,12 @@ def main():
         "test_samples": len(X_test),
         "feature_names": feature_names,
         "plot_path": plot_path,
-        "timestamp": pd.Timestamp.now().isoformat() if "pd" in dir() else None,
+        "timestamp": pd.Timestamp.now().isoformat(),
     }
 
-    # Fix timestamp
-    import pandas as pd
-    report["timestamp"] = pd.Timestamp.now().isoformat()
-
-    # Save report
     VALIDATION_REPORT.write_text(json.dumps(report, indent=2))
     log.info("Validation report → %s", VALIDATION_REPORT)
 
-    # Log to MLflow
     with mlflow.start_run(run_name="validation"):
         for k, v in metrics.items():
             mlflow.log_metric(f"val_{k}", v)
@@ -161,7 +147,6 @@ def main():
         mlflow.log_artifact(plot_path)
         mlflow.log_artifact(str(VALIDATION_REPORT))
 
-    # Gate check
     if not all_passed:
         failed = [k for k, v in gates.items() if not v["passed"]]
         log.error("❌ VALIDATION FAILED: %s", failed)
