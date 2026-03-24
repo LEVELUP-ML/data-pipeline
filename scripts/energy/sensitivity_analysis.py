@@ -42,10 +42,8 @@ def _make_explainer(model, X_sample):
 
     try:
         return shap.TreeExplainer(model)
-    except ValueError as e:
-        if "base_score" not in str(e):
-            raise
-        log.warning("SHAP/XGBoost base_score incompatibility — retrying with data argument")
+    except (ValueError, TypeError):
+        log.warning("SHAP TreeExplainer failed — retrying with data argument")
 
     # Passing data bypasses the base_score parsing path
     try:
@@ -53,7 +51,6 @@ def _make_explainer(model, X_sample):
     except Exception as e2:
         log.warning("TreeExplainer with data also failed: %s", e2)
         raise
-
 
 def main():
     """Run SHAP sensitivity analysis."""
