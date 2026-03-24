@@ -22,13 +22,26 @@ KAGGLE_KEY=your_api_key
 AIRFLOW_UID=1000
 ```
 
+Or use GitHub repository secrets (already configured):
+- `KAGGLE_USERNAME`
+- `KAGGLE_KEY`
+- `GCP_SA_KEY` (base64 encoded)
+- `FIREBASE_SA_KEY` (base64 encoded)
+- `SLACK_WEBHOOK_URL`
+
 ### 2. Add secrets
+
+For **local development**, secrets are committed to the repo:
 
 ```bash
 mkdir -p secrets
-cp /path/to/your/gcp-service-account.json secrets/gcp-sa.json
-cp /path/to/your/firebase-admin.json secrets/firebase-admin.json
+# Secrets are already in the repo, or export from GitHub secrets:
+# echo $GCP_SA_KEY | base64 -d > secrets/gcp-sa.json
+# echo $FIREBASE_SA_KEY | base64 -d > secrets/firebase-admin.json
 ```
+
+For **GitHub Actions CI/CD**, secrets are automatically available as environment variables.
+
 
 ### 3. Start all services
 

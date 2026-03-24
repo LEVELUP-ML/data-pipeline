@@ -115,6 +115,22 @@ stages:
       - data/models/flexibility/bias_report.json:
           cache: false
 
+  strength_features:
+    cmd: >
+      python -c "
+      import sys; sys.path.insert(0, 'dags');
+      from processing_dags.strength_features_dag import load_strength_sessions, build_lag_features, join_profiles;
+      r = load_strength_sessions();
+      l = build_lag_features(r);
+      join_profiles(l)
+      "
+    deps:
+      - data/processed/weightlifting_cleaned
+      - dags/processing_dags/strength_features_dag.py
+    outs:
+      - data/processed/strength_features.parquet:
+          cache: true
+
   train_strength_model:
     cmd: python scripts/model_train.py --model-type strength
     deps:

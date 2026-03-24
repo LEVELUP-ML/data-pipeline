@@ -5,7 +5,7 @@ Reads cleaned weightlifting data, builds supervised learning features
 for strength score forecasting, and writes data/processed/strength_features.parquet.
 
 Each training row = a user at reference session t, with:
-  - last N_LAGS=5 sessions as strength features (volume, max weight, etc.)
+  - last N_LAGS=5 sessions as lag features (1RM, volume, etc.)
   - target strength scores at t+1, t+3, t+7, t+14 days ahead
 
 Triggers strength_model DAG on success.
@@ -33,13 +33,23 @@ from dag_monitoring import (
 )
 
 AIRFLOW_HOME  = "/opt/airflow"
+RAW_DIR       = Path(f"{AIRFLOW_HOME}/data/raw")
 PROCESSED_DIR = Path(f"{AIRFLOW_HOME}/data/processed")
+SESSIONS_PATH = PROCESSED_DIR / "strength_sessions.parquet"
 FEATURES_PATH = PROCESSED_DIR / "strength_features.parquet"
 
 N_LAGS   = 5
 MIN_SESS = 7
 HORIZONS = [1, 3, 7, 14]
 AGE_BINS = [(0, 19, 0), (20, 29, 1), (30, 39, 2), (40, 200, 3)]
+
+
+def _bmr(age, sex, h, w):
+    try:
+        b = 10 * float(w) + 6.25 * float(h) - 5 * float(age)
+        return round(b - 161 if str(sex).lower() in ("female", "f") else b + 5)
+    except (TypeError, ValueError):
+        return None
 
 
 def _age_enc(age):
@@ -62,7 +72,7 @@ def _slope(vals: list) -> float:
     return float(np.dot(x, y) / d) if d else 0.0
 
 
-def _future_strength_score(dates, scores, ref, h):
+def _future_score(dates, scores, ref, h):
     target = ref + pd.Timedelta(days=h)
     best, best_gap = None, float("inf")
     for d, s in zip(dates, scores):
@@ -70,234 +80,6 @@ def _future_strength_score(dates, scores, ref, h):
         if g <= 2 and g < best_gap:
             best, best_gap = s, g
     return best
-
-
-@task
-def load_cleaned_data() -> pd.DataFrame:
-    """Load cleaned weightlifting data and compute per-session strength metrics."""
-    clean_path = PROCESSED_DIR / "weightlifting_cleaned"
-    if not clean_path.exists():
-        raise AirflowFailException(f"Cleaned weightlifting data not found: {clean_path}")
-
-    # Load all cleaned parquet files
-    dfs = []
-    for f in clean_path.glob("*.parquet"):
-        df = pd.read_parquet(f)
-        dfs.append(df)
-
-    if not dfs:
-        raise AirflowFailException("No cleaned weightlifting data files found")
-
-    df = pd.concat(dfs, ignore_index=True)
-
-    # Ensure we have required columns
-    required = ["Date", "Workout Name", "Exercise Name", "Set Order", "Weight", "Reps"]
-    missing = [col for col in required if col not in df.columns]
-    if missing:
-        raise AirflowFailException(f"Missing required columns: {missing}")
-
-    # Parse dates
-    df["Date"] = pd.to_datetime(df["Date"])
-    df = df.sort_values(["Date", "Workout Name", "Set Order"]).reset_index(drop=True)
-
-    # Add synthetic user_id if not present (for demo data)
-    if "user_id" not in df.columns:
-        # Group by workout sessions to create synthetic users
-        df["session_id"] = df.groupby(["Date", "Workout Name"]).ngroup()
-        df["user_id"] = df["session_id"] % 100  # Distribute across 100 synthetic users
-
-    log.info(f"Loaded {len(df)} weightlifting records from {len(df['user_id'].unique())} users")
-    return df
-
-
-@task
-def compute_session_strength(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute strength metrics per session per user."""
-    # Calculate 1RM estimates using Epley formula: weight * (1 + reps/30)
-    df["estimated_1rm"] = df["Weight"] * (1 + df["Reps"] / 30.0)
-
-    # Group by user and date to get session-level metrics
-    session_metrics = df.groupby(["user_id", "Date"]).agg({
-        "estimated_1rm": ["max", "mean", "sum"],  # Max 1RM, avg 1RM, total volume
-        "Weight": ["max", "sum"],  # Max weight, total weight moved
-        "Reps": ["sum", "count"],  # Total reps, number of sets
-        "Exercise Name": "nunique",  # Exercise variety
-    }).reset_index()
-
-    # Flatten column names
-    session_metrics.columns = [
-        "user_id", "Date",
-        "max_1rm", "avg_1rm", "total_1rm_volume",
-        "max_weight", "total_weight",
-        "total_reps", "num_sets",
-        "exercise_variety"
-    ]
-
-    # Calculate strength score as weighted combination
-    session_metrics["strength_score"] = (
-        session_metrics["max_1rm"] * 0.4 +
-        session_metrics["total_1rm_volume"] * 0.3 +
-        session_metrics["total_weight"] * 0.2 +
-        session_metrics["num_sets"] * 0.1
-    )
-
-    log.info(f"Computed strength metrics for {len(session_metrics)} sessions")
-    return session_metrics
-
-
-@task
-def build_lag_features(session_df: pd.DataFrame) -> pd.DataFrame:
-    """Build lag features for each user at each reference session."""
-    features = []
-
-    for user_id in session_df["user_id"].unique():
-        user_data = session_df[session_df["user_id"] == user_id].sort_values("Date")
-
-        if len(user_data) < MIN_SESS:
-            continue  # Skip users with too few sessions
-
-        for i in range(N_LAGS, len(user_data)):
-            ref_date = user_data.iloc[i]["Date"]
-            past_sessions = user_data.iloc[i-N_LAGS:i]
-
-            # Lag features
-            lag_max_1rm = past_sessions["max_1rm"].tolist()
-            lag_avg_1rm = past_sessions["avg_1rm"].tolist()
-            lag_total_volume = past_sessions["total_1rm_volume"].tolist()
-            lag_strength_scores = past_sessions["strength_score"].tolist()
-
-            # Trends
-            max_1rm_trend = _slope(lag_max_1rm)
-            strength_trend = _slope(lag_strength_scores)
-
-            # Recent performance
-            recent_max_1rm = lag_max_1rm[-1]
-            recent_avg_1rm = lag_avg_1rm[-1]
-            recent_volume = lag_total_volume[-1]
-
-            # Target values (future strength scores)
-            future_dates = user_data.iloc[i:]["Date"].tolist()
-            future_scores = user_data.iloc[i:]["strength_score"].tolist()
-
-            targets = {}
-            for h in HORIZONS:
-                targets[f"target_d{h}"] = _future_strength_score(
-                    future_dates, future_scores, ref_date, h
-                )
-
-            # Only include if we have targets
-            if any(t is not None for t in targets.values()):
-                features.append({
-                    "user_id": user_id,
-                    "reference_date": ref_date,
-                    # Lag features
-                    **{f"lag_max_1rm_{j+1}": v for j, v in enumerate(reversed(lag_max_1rm))},
-                    **{f"lag_avg_1rm_{j+1}": v for j, v in enumerate(reversed(lag_avg_1rm))},
-                    **{f"lag_volume_{j+1}": v for j, v in enumerate(reversed(lag_total_volume))},
-                    **{f"lag_strength_{j+1}": v for j, v in enumerate(reversed(lag_strength_scores))},
-                    # Derived features
-                    "max_1rm_trend": max_1rm_trend,
-                    "strength_trend": strength_trend,
-                    "recent_max_1rm": recent_max_1rm,
-                    "recent_avg_1rm": recent_avg_1rm,
-                    "recent_volume": recent_volume,
-                    # Targets
-                    **targets
-                })
-
-    features_df = pd.DataFrame(features)
-    log.info(f"Built {len(features_df)} feature rows from {len(session_df['user_id'].unique())} users")
-    return features_df
-
-
-@task
-def join_user_profiles(features_df: pd.DataFrame) -> pd.DataFrame:
-    """Add user profile features (age, sex, etc.) - using synthetic profiles for demo."""
-    # For demo purposes, create synthetic user profiles
-    # In production, this would join with actual user data from Firestore
-
-    np.random.seed(42)  # For reproducible synthetic data
-    user_ids = features_df["user_id"].unique()
-
-    profiles = {}
-    for uid in user_ids:
-        profiles[uid] = {
-            "age": np.random.randint(18, 65),
-            "sex": np.random.choice(["Male", "Female"]),
-            "height_cm": np.random.normal(170 if np.random.random() > 0.5 else 160, 10),
-            "weight_kg": np.random.normal(75, 15),
-        }
-
-    # Add profile features to each row
-    profile_features = []
-    for _, row in features_df.iterrows():
-        uid = row["user_id"]
-        profile = profiles[uid]
-
-        profile_features.append({
-            **row.to_dict(),
-            "age": profile["age"],
-            "sex": profile["sex"],
-            "height_cm": profile["height_cm"],
-            "weight_kg": profile["weight_kg"],
-            "age_encoded": _age_enc(profile["age"]),
-            "sex_encoded": 1 if profile["sex"] == "Male" else 0,
-        })
-
-    result_df = pd.DataFrame(profile_features)
-    log.info(f"Added profile features for {len(result_df)} rows")
-    return result_df
-
-
-@task
-def quality_gate(features_df: pd.DataFrame) -> Dict[str, Any]:
-    """Quality checks on the feature dataset."""
-    rows = len(features_df)
-    users = features_df["user_id"].nunique()
-
-    # Check target coverage
-    target_cols = [f"target_d{h}" for h in HORIZONS]
-    coverage = {}
-    for col in target_cols:
-        coverage[col] = features_df[col].notna().mean() * 100
-
-    d1_cov = coverage["target_d1"]
-    d14_cov = coverage["target_d14"]
-
-    if rows < 100:
-        raise AirflowFailException(f"Only {rows} rows — need ≥100. Generate more workout data.")
-    if d1_cov < 50.0:
-        raise AirflowFailException(f"target_d1 coverage {d1_cov}% < 50% — check session dates.")
-
-    log.info("Quality gate PASSED: %d rows, %d users, d1_cov=%.1f%%, d14_cov=%.1f%%",
-             rows, users, d1_cov, d14_cov)
-    emit_metric("strength_features", "quality_gate",
-                {"rows": rows, "users": users, "passed": True, **coverage})
-    return {"rows": rows, "users": users, "passed": True, **coverage}
-
-
-@task
-def save_features(features_df: pd.DataFrame) -> Dict[str, Any]:
-    """Save features to parquet and return metadata."""
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Drop rows with no targets
-    target_cols = [f"target_d{h}" for h in HORIZONS]
-    valid_df = features_df.dropna(subset=target_cols, how="all")
-
-    valid_df.to_parquet(FEATURES_PATH, index=False)
-
-    result = {
-        "path": str(FEATURES_PATH),
-        "rows": len(valid_df),
-        "users": valid_df["user_id"].nunique(),
-        "features": len([c for c in valid_df.columns if not c.startswith("target_")]),
-        "targets": len([c for c in valid_df.columns if c.startswith("target_")]),
-    }
-
-    log.info(f"Saved {result['rows']} feature rows to {FEATURES_PATH}")
-    emit_metric("strength_features", "save_features", result)
-    return result
 
 
 with DAG(
@@ -312,6 +94,206 @@ with DAG(
     tags=["strength", "features", "ingest"],
 ) as dag:
 
+    @task
+    def load_strength_sessions() -> Dict[str, Any]:
+        """Load cleaned weightlifting data, compute per-session strength metrics, save sessions parquet."""
+        clean_path = PROCESSED_DIR / "weightlifting_cleaned"
+        if not clean_path.exists():
+            raise AirflowFailException(f"Cleaned weightlifting data not found: {clean_path}")
+
+        dfs = []
+        for f in clean_path.glob("*.parquet"):
+            dfs.append(pd.read_parquet(f))
+
+        if not dfs:
+            raise AirflowFailException("No cleaned weightlifting data files found")
+
+        df = pd.concat(dfs, ignore_index=True)
+
+        required = ["Date", "Workout Name", "Exercise Name", "Set Order", "Weight", "Reps"]
+        missing = [col for col in required if col not in df.columns]
+        if missing:
+            raise AirflowFailException(f"Missing required columns: {missing}")
+
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.sort_values(["Date", "Workout Name", "Set Order"]).reset_index(drop=True)
+
+        if "user_id" not in df.columns:
+            df["session_id"] = df.groupby(["Date", "Workout Name"]).ngroup()
+            df["user_id"] = df["session_id"] % 100
+
+        # Epley 1RM estimate: weight * (1 + reps/30)
+        df["estimated_1rm"] = df["Weight"] * (1 + df["Reps"] / 30.0)
+
+        sessions = df.groupby(["user_id", "Date"]).agg(
+            max_1rm=("estimated_1rm", "max"),
+            avg_1rm=("estimated_1rm", "mean"),
+            total_1rm_volume=("estimated_1rm", "sum"),
+            max_weight=("Weight", "max"),
+            total_weight=("Weight", "sum"),
+            total_reps=("Reps", "sum"),
+            num_sets=("Reps", "count"),
+            exercise_variety=("Exercise Name", "nunique"),
+        ).reset_index()
+
+        sessions["strength_score"] = (
+            sessions["max_1rm"] * 0.4
+            + sessions["total_1rm_volume"] * 0.3
+            + sessions["total_weight"] * 0.2
+            + sessions["num_sets"] * 0.1
+        )
+
+        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        sessions.to_parquet(SESSIONS_PATH, index=False)
+
+        result = {"users": int(sessions["user_id"].nunique()), "sessions": len(sessions)}
+        log.info("Loaded %d sessions from %d users", result["sessions"], result["users"])
+        emit_metric("strength_features", "load_strength_sessions", result)
+        return result
+
+    @task
+    def build_lag_features(load_result: Dict) -> Dict[str, Any]:
+        if not SESSIONS_PATH.exists():
+            raise AirflowFailException(f"Missing: {SESSIONS_PATH}")
+
+        sessions = pd.read_parquet(SESSIONS_PATH)
+        sessions["Date"] = pd.to_datetime(sessions["Date"])
+        sessions = sessions.sort_values(["user_id", "Date"]).reset_index(drop=True)
+
+        rows: List[Dict] = []
+
+        for uid, grp in sessions.groupby("user_id"):
+            grp    = grp.sort_values("Date").reset_index(drop=True)
+            n      = len(grp)
+            if n < MIN_SESS:
+                continue
+
+            dates  = grp["Date"].tolist()
+            scores = grp["strength_score"].tolist()
+
+            for t in range(N_LAGS, n):
+                ref_date = dates[t]
+                row: Dict[str, Any] = {
+                    "user_id":   uid,
+                    "ref_date":  ref_date,
+                    "ref_score": scores[t],
+                }
+
+                # lag features: lag_1 = most recent session before t
+                for k in range(N_LAGS):
+                    idx = t - N_LAGS + k    # oldest → newest
+                    lag = N_LAGS - k        # lag_5 → lag_1
+                    s   = grp.iloc[idx]
+                    row[f"max_1rm_lag_{lag}"]   = s["max_1rm"]
+                    row[f"avg_1rm_lag_{lag}"]   = s["avg_1rm"]
+                    row[f"volume_lag_{lag}"]    = s["total_1rm_volume"]
+                    row[f"strength_lag_{lag}"]  = s["strength_score"]
+                    row[f"days_ago_lag_{lag}"]  = (ref_date - s["Date"]).days
+
+                last5_scores = scores[t - N_LAGS: t]
+
+                row["workout_count_7d"]  = sum(1 for d in dates[:t] if (ref_date - d).days <= 7)
+                row["workout_count_14d"] = sum(1 for d in dates[:t] if (ref_date - d).days <= 14)
+                row["mean_score_5"]      = float(np.nanmean(last5_scores))
+                row["score_trend_5"]     = _slope(last5_scores)
+                row["days_since_last"]   = (ref_date - dates[t - 1]).days
+
+                for h in HORIZONS:
+                    row[f"target_d{h}"] = _future_score(dates, scores, ref_date, h)
+
+                rows.append(row)
+
+        if not rows:
+            raise AirflowFailException(
+                f"No feature rows built. Need ≥{MIN_SESS} sessions per user."
+            )
+
+        out = pd.DataFrame(rows)
+        (PROCESSED_DIR / "strength_features_noprofile.parquet").parent.mkdir(
+            parents=True, exist_ok=True
+        )
+        out.to_parquet(str(PROCESSED_DIR / "strength_features_noprofile.parquet"), index=False)
+
+        result = {
+            "rows":         len(out),
+            "users":        int(out["user_id"].nunique()),
+            "d1_null_pct":  round(out["target_d1"].isna().mean() * 100, 2),
+            "d14_null_pct": round(out["target_d14"].isna().mean() * 100, 2),
+        }
+        log.info("Lag features: %s", result)
+        emit_metric("strength_features", "build_lag_features", result)
+        return result
+
+    @task
+    def join_profiles(lag_result: Dict) -> Dict[str, Any]:
+        feat_path = PROCESSED_DIR / "strength_features_noprofile.parquet"
+        if not feat_path.exists():
+            raise AirflowFailException(f"Missing: {feat_path}")
+
+        feat = pd.read_parquet(str(feat_path))
+
+        # Synthetic profiles (strength data has no Firestore user profiles)
+        user_ids = sorted(feat["user_id"].unique())
+        profiles = []
+        for uid in user_ids:
+            rng = np.random.default_rng(int(uid))
+            sex = rng.choice(["Male", "Female"])
+            age = int(rng.integers(18, 65))
+            h   = float(rng.normal(170 if sex == "Male" else 160, 10))
+            w   = float(rng.normal(75, 15))
+            profiles.append({"user_id": uid, "age": age, "sex": sex,
+                              "height_cm": h, "weight_kg": w})
+
+        profs = pd.DataFrame(profiles)
+        profs["bmr"]            = profs.apply(
+            lambda r: _bmr(r["age"], r["sex"], r["height_cm"], r["weight_kg"]), axis=1
+        )
+        profs["sex_encoded"]    = profs["sex"].map({"Male": 1, "male": 1, "M": 1, "Female": 0, "female": 0, "F": 0})
+        profs["age_bucket_enc"] = profs["age"].apply(_age_enc)
+
+        # Keep raw sex/age columns separately for bias slicing (mirrors flexibility)
+        profs_model = profs[["user_id", "age", "sex_encoded", "bmr", "age_bucket_enc"]].copy()
+        profs_bias  = profs[["user_id", "sex", "age"]].rename(
+            columns={"sex": "sex_raw", "age": "age_raw"}
+        )
+
+        joined = pd.merge(feat, profs_model, on="user_id", how="left")
+        joined = pd.merge(joined, profs_bias,  on="user_id", how="left")
+        joined = joined.sort_values(["user_id", "ref_date"]).reset_index(drop=True)
+
+        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        joined.to_parquet(str(FEATURES_PATH), index=False)
+
+        result = {
+            "final_rows":       len(joined),
+            "columns":          len(joined.columns),
+            "users":            int(joined["user_id"].nunique()),
+            "missing_bmr_pct":  round(joined["bmr"].isna().mean() * 100, 2),
+            "d1_coverage_pct":  round((1 - joined["target_d1"].isna().mean()) * 100, 2),
+            "d14_coverage_pct": round((1 - joined["target_d14"].isna().mean()) * 100, 2),
+        }
+        log.info("Final features: %s", result)
+        emit_metric("strength_features", "join_profiles", result)
+        return result
+
+    @task
+    def quality_gate(load_r: Dict, lag_r: Dict, join_r: Dict) -> Dict[str, Any]:
+        rows    = join_r["final_rows"]
+        users   = join_r["users"]
+        d1_cov  = join_r["d1_coverage_pct"]
+        d14_cov = join_r["d14_coverage_pct"]
+
+        if rows < 100:
+            raise AirflowFailException(f"Only {rows} rows — need ≥100. Generate more workout data.")
+        if d1_cov < 50.0:
+            raise AirflowFailException(f"target_d1 coverage {d1_cov}% < 50% — check session dates.")
+
+        log.info("Quality gate PASSED: %d rows, %d users, d1_cov=%.1f%%, d14_cov=%.1f%%",
+                 rows, users, d1_cov, d14_cov)
+        emit_metric("strength_features", "quality_gate",
+                    {"rows": rows, "users": users, "passed": True})
+        return {"rows": rows, "users": users, "passed": True}
+
     trigger_model = TriggerDagRunOperator(
         task_id="trigger_strength_model",
         trigger_dag_id="strength_model",
@@ -319,10 +301,8 @@ with DAG(
         reset_dag_run=True,
     )
 
-    raw     = load_cleaned_data()
-    sessions = compute_session_strength(raw)
-    lags    = build_lag_features(sessions)
-    joined  = join_user_profiles(lags)
-    gate    = quality_gate(joined)
-    saved   = save_features(joined)
-    saved >> trigger_model
+    load_r   = load_strength_sessions()
+    lags     = build_lag_features(load_r)
+    joined   = join_profiles(lags)
+    gate     = quality_gate(load_r, lags, joined)
+    gate >> trigger_model

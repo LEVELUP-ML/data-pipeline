@@ -65,15 +65,16 @@ plt.rcParams.update({
 })
 
 
-def _save(fig, name):
-    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
-    path = PLOTS_DIR / name
+def _save(fig, name, plots_dir=None):
+    out_dir = Path(plots_dir) if plots_dir else PLOTS_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / name
     fig.savefig(str(path), dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved -> {path}")
 
 
-def plot_horizon_rmse(metrics):
+def plot_horizon_rmse(metrics, plots_dir=None):
     model_results = metrics.get("model_comparison", {})
     if not model_results:
         model_results = {"XGBoost (best)": metrics["test_metrics"]}
@@ -100,10 +101,10 @@ def plot_horizon_rmse(metrics):
     ax.set_title("Model comparison — RMSE per forecast horizon")
     ax.legend(loc="upper left", framealpha=0.9)
     ax.set_ylim(0, ax.get_ylim()[1] * 1.15)
-    _save(fig, "01_horizon_rmse_comparison.png")
+    _save(fig, "01_horizon_rmse_comparison.png", plots_dir)
 
 
-def plot_model_selection(metrics):
+def plot_model_selection(metrics, plots_dir=None):
     model_results = metrics.get("model_comparison", {})
     if not model_results:
         model_results = {"XGBoost": metrics["test_metrics"]}
@@ -136,10 +137,10 @@ def plot_model_selection(metrics):
     fig.legend(handles=[patch], loc="lower center", bbox_to_anchor=(0.5, -0.04))
     fig.suptitle("Model selection — +7d forecast horizon", fontsize=13, fontweight="bold")
     fig.tight_layout()
-    _save(fig, "02_model_selection.png")
+    _save(fig, "02_model_selection.png", plots_dir)
 
 
-def plot_shap(metrics):
+def plot_shap(metrics, plots_dir=None):
     shap_data = metrics.get("shap_top10", {})
     if not shap_data:
         print("  WARNING: no SHAP data in metrics.json — skipping plot 03")
@@ -154,16 +155,15 @@ def plot_shap(metrics):
 
     fig, ax = plt.subplots(figsize=(8, 5))
     ax.barh(features, values, color=colors, alpha=0.88, zorder=3)
-    for v, f in zip(values, features):
-        ax.text(v + max(values) * 0.01, features.index(f), f"{v:.4f}",
-                va="center", fontsize=8.5)
+    for i, (v, f) in enumerate(zip(values, features)):
+        ax.text(v + max(values) * 0.01, i, f"{v:.4f}", va="center", fontsize=8.5)
     ax.set_xlabel("Mean |SHAP value| (impact on +7d prediction)")
     ax.set_title("Feature importance — SHAP (top 10, horizon +7d)")
     ax.set_xlim(0, max(values) * 1.25)
-    _save(fig, "03_shap_top10.png")
+    _save(fig, "03_shap_top10.png", plots_dir)
 
 
-def plot_bias_slice(bias, slice_col, plot_name, title):
+def plot_bias_slice(bias, slice_col, plot_name, title, plots_dir=None):
     slice_data = bias.get("slices", {}).get(slice_col)
     if not slice_data:
         print(f"  WARNING: no bias data for '{slice_col}' — skipping {plot_name}")
@@ -202,10 +202,10 @@ def plot_bias_slice(bias, slice_col, plot_name, title):
         mpatches.Patch(color=PALETTE["accent"],  label="Fairlearn flagged (>50% worse)"),
     ]
     ax.legend(handles=patches, fontsize=8.5, framealpha=0.9)
-    _save(fig, plot_name)
+    _save(fig, plot_name, plots_dir)
 
 
-def plot_hyperparam_sensitivity(metrics):
+def plot_hyperparam_sensitivity(metrics, plots_dir=None):
     sens = metrics.get("hyperparam_sensitivity", {})
     corr = sens.get("correlations", {})
     if not corr:
@@ -233,20 +233,21 @@ def plot_hyperparam_sensitivity(metrics):
         mpatches.Patch(color=PALETTE["accent"],  label="Negative effect"),
     ]
     ax.legend(handles=patches, fontsize=9)
-    _save(fig, "06_hyperparam_sensitivity.png")
+    _save(fig, "06_hyperparam_sensitivity.png", plots_dir)
 
 
-def plot_score_distributions():
+def plot_score_distributions(features_path=None, plots_dir=None):
     try:
         import pandas as pd
     except ImportError:
         print("  WARNING: pandas not available — skipping plot 07")
         return
-    if not FEATURES_PATH.exists():
+    fp = Path(features_path) if features_path else FEATURES_PATH
+    if not fp.exists():
         print(f"  WARNING: feature file not found — skipping plot 07")
         return
 
-    df     = pd.read_parquet(str(FEATURES_PATH))
+    df     = pd.read_parquet(str(fp))
     colors = [PALETTE["primary"], PALETTE["secondary"], PALETTE["accent"], PALETTE["warn"]]
     fig, axes = plt.subplots(1, 4, figsize=(14, 4), sharey=False)
 
@@ -265,31 +266,33 @@ def plot_score_distributions():
 
     fig.suptitle("Distribution of forecast targets by horizon", fontsize=13, fontweight="bold")
     fig.tight_layout()
-    _save(fig, "07_score_distribution.png")
+    _save(fig, "07_score_distribution.png", plots_dir)
 
 
-def generate_all(metrics_path=None, bias_path=None):
-    metrics_path = Path(metrics_path) if metrics_path else MODELS_DIR / "metrics.json"
-    bias_path    = Path(bias_path)    if bias_path    else MODELS_DIR / "bias_report.json"
+def generate_all(metrics_path=None, bias_path=None, plots_dir=None, features_path=None):
+    _metrics_path  = Path(metrics_path)  if metrics_path  else MODELS_DIR / "metrics.json"
+    _bias_path     = Path(bias_path)     if bias_path     else MODELS_DIR / "bias_report.json"
+    _plots_dir     = Path(plots_dir)     if plots_dir     else PLOTS_DIR
+    _features_path = Path(features_path) if features_path else FEATURES_PATH
 
-    if not metrics_path.exists():
+    if not _metrics_path.exists():
         raise FileNotFoundError(
-            f"metrics.json not found at {metrics_path}\n"
+            f"metrics.json not found at {_metrics_path}\n"
             "Run model_train.py first."
         )
 
-    metrics = json.loads(metrics_path.read_text())
-    bias    = json.loads(bias_path.read_text()) if bias_path.exists() else {}
+    metrics = json.loads(_metrics_path.read_text())
+    bias    = json.loads(_bias_path.read_text()) if _bias_path.exists() else {}
 
-    print(f"Generating plots -> {PLOTS_DIR}/")
-    plot_horizon_rmse(metrics)
-    plot_model_selection(metrics)
-    plot_shap(metrics)
-    plot_bias_slice(bias, "sex",        "04_bias_sex.png", "Bias by sex — RMSE at +7d horizon")
-    plot_bias_slice(bias, "age_bucket", "05_bias_age.png", "Bias by age group — RMSE at +7d horizon")
-    plot_hyperparam_sensitivity(metrics)
-    plot_score_distributions()
-    print(f"Done. {len(list(PLOTS_DIR.glob('*.png')))} plots in {PLOTS_DIR}")
+    print(f"Generating plots -> {_plots_dir}/")
+    plot_horizon_rmse(metrics, _plots_dir)
+    plot_model_selection(metrics, _plots_dir)
+    plot_shap(metrics, _plots_dir)
+    plot_bias_slice(bias, "sex",        "04_bias_sex.png", "Bias by sex — RMSE at +7d horizon",       _plots_dir)
+    plot_bias_slice(bias, "age_bucket", "05_bias_age.png", "Bias by age group — RMSE at +7d horizon", _plots_dir)
+    plot_hyperparam_sensitivity(metrics, _plots_dir)
+    plot_score_distributions(_features_path, _plots_dir)
+    print(f"Done. {len(list(_plots_dir.glob('*.png')))} plots in {_plots_dir}")
 
 
 if __name__ == "__main__":

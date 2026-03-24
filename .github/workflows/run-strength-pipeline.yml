@@ -1,56 +1,21 @@
-# .github/workflows/flexibility_model_ci.yml
-#
-# CI/CD pipeline for the flexibility forecasting model.
-# Follows the Model Development Guidelines (Section 7):
-#   - Trigger on pushes that affect model or feature code
-#   - Automated training, validation, bias check
-#   - Registry push on main branch (deploy gate)
-#   - Rollback signal on RMSE regression
-#   - Slack notifications on pass/fail
-#
-# Required GitHub Secrets:
-#   GCP_SA_KEY          — base64-encoded GCP service account JSON (with GCS write access)
-#   FIREBASE_SA_KEY     — base64-encoded Firebase Admin SDK JSON
-#   KAGGLE_USERNAME     — Kaggle API username
-#   KAGGLE_KEY          — Kaggle API key
-#   SLACK_WEBHOOK_URL   — Slack Incoming Webhook (optional, for notifications)
-#
-# Required GitHub Variables (repo-level):
-#   GCS_BACKUP_BUCKET   — e.g. raw_data_lvlup
-#   MODEL_RMSE_THRESHOLD — e.g. 10.0
-
-name: Flexibility Model CI/CD
+name: Run Strength Pipeline
 
 on:
   push:
-    branches: [main, "model/*", "feature/model-*"]
+    branches: [main, develop]
     paths:
       - "scripts/model_train.py"
-      - "dags/processing_dags/flexibility_features_dag.py"
-      - "dags/processing_dags/flexibility_model_dag.py"
-      - "data_seeding/main.py"
+      - "dags/processing_dags/strength_features_dag.py"
+      - "dags/processing_dags/strength_model_dag.py"
       - "requirements.txt"
-      - ".github/workflows/flexibility_model_ci.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "scripts/model_train.py"
-      - "dags/processing_dags/flexibility_features_dag.py"
-  workflow_dispatch:
-    inputs:
-      rmse_threshold:
-        description: "Override RMSE gate threshold (d7 horizon)"
-        required: false
-        default: "10.0"
+      - ".github/workflows/run-strength-pipeline.yml"
+  workflow_dispatch:  # Manual trigger from GitHub UI
 
 env:
   AIRFLOW_HOME: ${{ github.workspace }}
-  PYTHONDONTWRITEBYTECODE: 1
-  PYTHONUNBUFFERED: 1
-  MODEL_RMSE_THRESHOLD: ${{ github.event.inputs.rmse_threshold || vars.MODEL_RMSE_THRESHOLD || '10.0' }}
+  MODEL_RMSE_THRESHOLD: "15.0"
 
 jobs:
-  #  1. Lint & unit tests 
   test:
     name: Lint and unit tests
     runs-on: ubuntu-latest
@@ -70,16 +35,15 @@ jobs:
 
       - name: Fix lint issues
         run: ruff check scripts/model_train.py dags/ --fix
-        
+
       - name: Lint (ruff)
         run: ruff check scripts/model_train.py dags/
 
       - name: Run unit tests
         run: pytest tests/ -v --tb=short -m "not slow"
 
-  #  2. Train, validate, bias check ─
   train:
-    name: Train and validate model
+    name: Train and validate strength model
     runs-on: ubuntu-latest
     needs: test
     timeout-minutes: 60
@@ -94,50 +58,45 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt "dvc[gs]"
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Set up Firebase service account
+      - name: Pull strength features via DVC
         run: |
-          mkdir -p $AIRFLOW_HOME/secrets
-          echo "${{ secrets.FIREBASE_SA_KEY }}" | base64 -d \
-            > $AIRFLOW_HOME/secrets/firebase-admin.json
+          dvc pull data/processed/strength_features.parquet 2>/dev/null || \
+            echo "Feature file not in DVC cache — will attempt Kaggle download"
 
-      - name: Pull feature data via DVC
+      - name: Download and clean weightlifting data (if features not cached)
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
         run: |
-          pip install "dvc[gs]"
-          dvc pull data/processed/flexibility_features.parquet 2>/dev/null || \
-            echo "Feature file not in DVC cache — will run feature engineering locally"
-
-      - name: Check features available
-        run: |
-          if [ ! -f data/processed/flexibility_features.parquet ]; then
-            echo "ERROR: flexibility_features.parquet not found."
-            echo "Features must be built via the flexibility_features Airflow DAG and pushed to DVC."
-            echo "Run: airflow dags trigger flexibility_features && dvc push"
-            exit 1
+          if [ ! -f data/processed/strength_features.parquet ]; then
+            echo "Running feature pipeline via DVC..."
+            dvc repro clean_weightlifting
+            dvc repro train_strength_model
           else
-            echo "Features available — proceeding to training."
+            echo "Strength features available — proceeding to training only."
           fi
 
-      - name: Train model
-        env:
-          MLFLOW_TRACKING_URI: sqlite:///${{ env.AIRFLOW_HOME }}/data/models/mlflow.db
+      - name: Train strength model (if features were pre-cached)
+        if: ${{ hashFiles('data/processed/strength_features.parquet') != '' }}
         run: |
-          mkdir -p data/models/flexibility
+          mkdir -p data/models/strength
           python scripts/model_train.py \
             --run-id "ci_${{ github.sha }}" \
+            --model-type strength \
             --rmse-threshold "${{ env.MODEL_RMSE_THRESHOLD }}"
 
       - name: Display metrics summary
         run: |
           python - <<'PYEOF'
           import json
-          m = json.load(open("data/models/flexibility/metrics.json"))
+          m = json.load(open("data/models/strength/metrics.json"))
           print(f"Winner: {m['winner_model']}")
           print(f"Gate ({m['gate_horizon']}) RMSE: {m['gate_rmse']:.4f}  (threshold={m['rmse_threshold']})")
           print(f"Passed gate: {m['passed_gate']}")
@@ -153,7 +112,7 @@ jobs:
         run: |
           python - <<'PYEOF'
           import json, sys
-          b = json.load(open("data/models/flexibility/bias_report.json"))
+          b = json.load(open("data/models/strength/bias_report.json"))
           flags = b.get("flagged", [])
           if flags:
               print(f"WARNING: {len(flags)} bias flag(s):")
@@ -167,12 +126,12 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: flexibility-model-${{ github.sha }}
+          name: strength-model-${{ github.sha }}
           path: |
-            data/models/flexibility/metrics.json
-            data/models/flexibility/bias_report.json
-            data/models/flexibility/shap_summary.png
-            data/models/flexibility/plots/
+            data/models/strength/metrics.json
+            data/models/strength/bias_report.json
+            data/models/strength/shap_summary.png
+            data/models/strength/plots/
           retention-days: 30
 
       - name: Notify Slack — training result
@@ -184,17 +143,17 @@ jobs:
           import json, os, urllib.request
           url = os.environ["SLACK_WEBHOOK_URL"]
           try:
-              m      = json.load(open("data/models/flexibility/metrics.json"))
+              m      = json.load(open("data/models/strength/metrics.json"))
               status = ":large_green_circle: PASSED" if m["passed_gate"] else ":red_circle: FAILED"
               text   = (
-                  f"*Flexibility Model CI — {status}*\n"
+                  f"*Strength Model CI — {status}*\n"
                   "Commit: `" + "${{ github.sha }}"[:8] + "`\n"
                   f"Winner: {m['winner_model']}\n"
                   f"Gate RMSE (d7): `{m['gate_rmse']:.4f}` (threshold `{m['rmse_threshold']}`)\n"
                   f"Bias flags: {len(m.get('bias_flagged', []))}"
               )
           except Exception as e:
-              text = f":fire: Flexibility Model CI — ERROR reading metrics: {e}"
+              text = f":fire: Strength Model CI — ERROR reading metrics: {e}"
           req = urllib.request.Request(
               url, json.dumps({"text": text}).encode(),
               {"Content-Type": "application/json"}, method="POST"
@@ -202,7 +161,6 @@ jobs:
           urllib.request.urlopen(req, timeout=10)
           PYEOF
 
-  #  3. Push to registry (main branch only) ─
   deploy:
     name: Push to GCS model registry
     runs-on: ubuntu-latest
@@ -231,8 +189,8 @@ jobs:
       - name: Download model artifacts from CI job
         uses: actions/download-artifact@v4
         with:
-          name: flexibility-model-${{ github.sha }}
-          path: data/models/flexibility/
+          name: strength-model-${{ github.sha }}
+          path: data/models/strength/
 
       - name: Rollback check against deployed model
         env:
@@ -241,11 +199,11 @@ jobs:
           python - <<'PYEOF'
           import json, os, subprocess, sys
           bucket   = os.environ["GCS_BACKUP_BUCKET"]
-          new_m    = json.load(open("data/models/flexibility/metrics.json"))
+          new_m    = json.load(open("data/models/strength/metrics.json"))
           new_rmse = new_m["gate_rmse"]
 
           result = subprocess.run(
-              ["gsutil", "cat", f"gs://{bucket}/model_registry/flexibility/latest.json"],
+              ["gsutil", "cat", f"gs://{bucket}/model_registry/strength/latest.json"],
               capture_output=True, text=True
           )
           if result.returncode != 0:
@@ -272,17 +230,17 @@ jobs:
           GCS_BACKUP_BUCKET: ${{ vars.GCS_BACKUP_BUCKET }}
         run: |
           TS=$(date -u +%Y%m%dT%H%M%S)
-          PREFIX="gs://${GCS_BACKUP_BUCKET}/model_registry/flexibility/${TS}"
+          PREFIX="gs://${GCS_BACKUP_BUCKET}/model_registry/strength/${TS}"
           echo "Uploading to ${PREFIX}/"
 
-          gsutil cp data/models/flexibility/metrics.json     "${PREFIX}/metrics.json"
-          gsutil cp data/models/flexibility/bias_report.json "${PREFIX}/bias_report.json"
-          gsutil cp data/models/flexibility/shap_summary.png "${PREFIX}/shap_summary.png" 2>/dev/null || true
-          gsutil -m cp -r data/models/flexibility/plots/     "${PREFIX}/plots/" 2>/dev/null || true
+          gsutil cp data/models/strength/metrics.json     "${PREFIX}/metrics.json"
+          gsutil cp data/models/strength/bias_report.json "${PREFIX}/bias_report.json"
+          gsutil cp data/models/strength/shap_summary.png "${PREFIX}/shap_summary.png" 2>/dev/null || true
+          gsutil -m cp -r data/models/strength/plots/     "${PREFIX}/plots/" 2>/dev/null || true
 
           python - <<PYEOF
           import json, os
-          m = json.load(open("data/models/flexibility/metrics.json"))
+          m = json.load(open("data/models/strength/metrics.json"))
           latest = {
               "timestamp": "${TS}",
               "prefix":    "${PREFIX}",
@@ -297,17 +255,17 @@ jobs:
           PYEOF
 
           gsutil cp /tmp/latest.json \
-            "gs://${GCS_BACKUP_BUCKET}/model_registry/flexibility/latest.json"
+            "gs://${GCS_BACKUP_BUCKET}/model_registry/strength/latest.json"
           echo "Registry push complete: ${PREFIX}"
 
       - name: DVC track model artifacts
         run: |
-          dvc add data/models/flexibility/
+          dvc add data/models/strength/
           git config user.email "ci@github-actions"
           git config user.name  "GitHub Actions"
-          git add data/models/flexibility.dvc
+          git add data/models/strength.dvc
           git diff --cached --quiet && echo "Nothing to commit" || \
-            git commit -m "chore: update model artifact DVC pointer [ci skip]"
+            git commit -m "chore: update strength model artifact DVC pointer [ci skip]"
 
       - name: Notify Slack — deploy result
         if: always() && env.SLACK_WEBHOOK_URL != ''
@@ -319,7 +277,7 @@ jobs:
           url    = os.environ["SLACK_WEBHOOK_URL"]
           status = ":rocket: Deployed" if "${{ job.status }}" == "success" else ":fire: Deploy Failed"
           sha_short = "${{ github.sha }}"[:8]
-          text   = f"*Flexibility Model — {status}*\nCommit: `{sha_short}`"
+          text   = f"*Strength Model — {status}*\nCommit: `{sha_short}`"
           req = urllib.request.Request(
               url, json.dumps({"text": text}).encode(),
               {"Content-Type": "application/json"}, method="POST"

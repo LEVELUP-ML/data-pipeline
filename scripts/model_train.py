@@ -79,7 +79,7 @@ def get_model_config(model_type: str):
             "models_dir": Path(f"{AIRFLOW_HOME}/data/models/strength"),
             "experiment_name": "strength_score_forecasting",
             "rmse_threshold": 15.0,
-            "non_feature_cols": {"user_id", "reference_date", "age", "sex", "height_cm", "weight_kg"},
+            "non_feature_cols": {"user_id", "ref_date", "ref_score", "sex_raw", "age_raw"},
         }
     }
 
@@ -114,7 +114,6 @@ def load_data():
 
 
 def time_split(df):
-    # Handle different date column names
     date_col = "ref_date" if "ref_date" in df.columns else "reference_date"
     dates   = sorted(df[date_col].unique())
     cut_idx = int(len(dates) * (1 - TEST_FRAC))
@@ -325,6 +324,7 @@ def train(run_id=None, model_type="flexibility"):
 
     df              = load_data()
     train_df, test_df = time_split(df)
+    date_col        = "ref_date" if "ref_date" in df.columns else "reference_date"
     feature_cols    = get_feature_cols(df)
     X_train, Y_train = prepare(train_df, feature_cols)
     X_test,  Y_test  = prepare(test_df,  feature_cols)
@@ -407,8 +407,8 @@ def train(run_id=None, model_type="flexibility"):
                     mlflow.log_artifact(str(SHAP_PATH))
                 mlflow.sklearn.log_model(
                     winner_model,
-                    artifact_path="flexibility_forecaster",
-                    registered_model_name="flexibility_score_forecaster",
+                    artifact_path=f"{model_type}_forecaster",
+                    registered_model_name=f"{model_type}_score_forecaster",
                 )
             except Exception as e:
                 print(f"WARNING: MLflow logging failed ({e}) — artifacts saved locally regardless.")
@@ -426,10 +426,10 @@ def train(run_id=None, model_type="flexibility"):
             "test_rows":              len(X_test),
             "users_train":            int(train_df["user_id"].nunique()),
             "users_test":             int(test_df["user_id"].nunique()),
-            "train_date_range":       [str(train_df["ref_date"].min().date()),
-                                       str(train_df["ref_date"].max().date())],
-            "test_date_range":        [str(test_df["ref_date"].min().date()),
-                                       str(test_df["ref_date"].max().date())],
+            "train_date_range":       [str(train_df[date_col].min().date()),
+                                       str(train_df[date_col].max().date())],
+            "test_date_range":        [str(test_df[date_col].min().date()),
+                                       str(test_df[date_col].max().date())],
             "model_comparison":       comparison,
             "best_params":            {k.replace("estimator__", ""): v
                                        for k, v in best_params.items()},
@@ -461,7 +461,12 @@ def train(run_id=None, model_type="flexibility"):
                 spec = importlib.util.spec_from_file_location("generate_plots", str(plots_path))
                 mod  = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
-                mod.generate_all()
+                mod.generate_all(
+                    metrics_path=str(METRICS_PATH),
+                    bias_path=str(BIAS_PATH),
+                    plots_dir=str(MODELS_DIR / "plots"),
+                    features_path=str(FEATURES_PATH),
+                )
         except Exception as e:
             print(f"WARNING: plot generation failed (non-fatal): {e}")
 
