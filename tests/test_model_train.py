@@ -157,7 +157,7 @@ class TestGetFeatureCols:
             assert f in cols
 
 
-#  prepare ─
+#  prepare 
 
 class TestPrepare:
     def test_drops_null_targets(self, mt, features_df):
@@ -218,7 +218,7 @@ class TestHyperparamSensitivity:
         assert "available" in result or "correlations" in result
 
 
-#  smoke tests ─
+#  smoke tests 
 
 class TestTrainSmoke:
     """

@@ -1,0 +1,368 @@
+# .github/workflows/energy_model_ci.yml
+#
+# CI/CD pipeline for the Level Up energy score prediction model.
+# Separate from the flexibility model pipeline.
+#
+# Model: RandomForest / XGBoost predicting daily energy score (0–100)
+#        from sleep, quiz, and activity features.
+#
+# Required GitHub Secrets (shared with flexibility pipeline):
+#   GCP_SA_KEY        — base64-encoded GCP service account JSON
+#   SLACK_WEBHOOK_URL — Slack Incoming Webhook (optional)
+#
+# Required GitHub Variables:
+#   GCS_BACKUP_BUCKET      — e.g. raw_data_lvlup
+#   ENERGY_MAE_THRESHOLD   — e.g. 5.0  (default if not set)
+#   ENERGY_R2_THRESHOLD    — e.g. 0.7  (default if not set)
+
+name: Energy Model CI/CD
+
+on:
+  push:
+    branches: [main, "model/*", "feature/model-*"]
+    paths:
+      - "scripts/energy/**"
+      - "tests/energy/**"
+      - "requirements.txt"
+      - ".github/workflows/energy_model_ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "scripts/energy/**"
+      - "tests/energy/**"
+  workflow_dispatch:
+    inputs:
+      skip_tuning:
+        description: "Skip hyperparameter tuning (faster CI)"
+        required: false
+        default: "false"
+      mae_threshold:
+        description: "Override MAE gate threshold"
+        required: false
+        default: "5.0"
+
+env:
+  AIRFLOW_HOME: ${{ github.workspace }}
+  PYTHONDONTWRITEBYTECODE: 1
+  PYTHONUNBUFFERED: 1
+  ENERGY_MAE_THRESHOLD: ${{ github.event.inputs.mae_threshold || vars.ENERGY_MAE_THRESHOLD || '5.0' }}
+  ENERGY_R2_THRESHOLD: ${{ vars.ENERGY_R2_THRESHOLD || '0.7' }}
+
+jobs:
+  # ── 1. Lint & unit tests ────────────────────────────────────────────────────
+  test:
+    name: Lint and unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest ruff
+
+      - name: Lint energy scripts
+        run: ruff check scripts/energy/ --fix && ruff check scripts/energy/
+
+      - name: Run energy model unit tests
+        run: pytest tests/energy/ -v --tb=short
+
+  # ── 2. Train, validate, bias + SHAP ─────────────────────────────────────────
+  train:
+    name: Train and validate energy model
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Generate synthetic daily_joined features for CI
+        # In production this parquet comes from the Airflow synthetic data DAG.
+        # In CI we generate it inline with the same schema.
+        run: |
+          if [ ! -f data/processed/daily_joined.parquet ]; then
+            echo "Generating synthetic daily_joined.parquet for CI..."
+            mkdir -p data/processed
+            python - <<'PYEOF'
+          import numpy as np
+          import pandas as pd
+
+          rng = np.random.default_rng(42)
+          n   = 500
+          df  = pd.DataFrame({
+              "user_id":                [f"user_{i:03d}" for i in rng.integers(1, 30, n)],
+              "date":                   pd.date_range("2025-01-01", periods=n, freq="D"),
+              "sleep_hours":            rng.normal(7, 1.2, n).clip(2, 14),
+              "sleep_satisfaction":     rng.uniform(0, 1, n),
+              "rolling_sleep_hours_7d": rng.normal(7, 0.8, n).clip(3, 12),
+              "bedtime_variability_7d": rng.uniform(10, 120, n),
+              "avg_accuracy":           rng.uniform(0.3, 1.0, n),
+              "int_score":              rng.uniform(20, 100, n),
+              "rolling_int_7d":         rng.uniform(25, 95, n),
+              "bmr":                    rng.integers(1200, 2200, n).astype(float),
+              "attempts_count":         rng.integers(0, 5, n).astype(float),
+              "age":                    rng.integers(14, 60, n).astype(float),
+              "sex":                    rng.choice(["Male", "Female"], n),
+              "height":                 rng.integers(150, 195, n).astype(float),
+              "weight":                 rng.integers(45, 120, n).astype(float),
+          })
+          df.to_parquet("data/processed/daily_joined.parquet", index=False)
+          print(f"Generated {len(df)} synthetic rows for CI")
+          PYEOF
+          else
+            echo "daily_joined.parquet already present — skipping generation."
+          fi
+
+      - name: Hyperparameter tuning
+        if: github.event.inputs.skip_tuning != 'true'
+        env:
+          ENERGY_FEATURES_PATH: ${{ github.workspace }}/data/processed/daily_joined.parquet
+          MLFLOW_TRACKING_URI: sqlite:///${{ github.workspace }}/data/models/energy/mlflow.db
+        run: |
+          mkdir -p data/models/energy
+          python scripts/energy/hyperparameter_tuning.py
+
+      - name: Train energy model
+        env:
+          ENERGY_FEATURES_PATH: ${{ github.workspace }}/data/processed/daily_joined.parquet
+          MLFLOW_TRACKING_URI: sqlite:///${{ github.workspace }}/data/models/energy/mlflow.db
+          ENERGY_MAE_THRESHOLD: ${{ env.ENERGY_MAE_THRESHOLD }}
+          ENERGY_R2_THRESHOLD: ${{ env.ENERGY_R2_THRESHOLD }}
+        run: |
+          PARAMS=""
+          if [ -f data/models/energy/best_params.json ]; then
+            PARAMS="data/models/energy/best_params.json"
+          fi
+          python scripts/energy/train_model.py $PARAMS
+
+      - name: Validate model
+        env:
+          ENERGY_FEATURES_PATH: ${{ github.workspace }}/data/processed/daily_joined.parquet
+          MLFLOW_TRACKING_URI: sqlite:///${{ github.workspace }}/data/models/energy/mlflow.db
+          ENERGY_MAE_THRESHOLD: ${{ env.ENERGY_MAE_THRESHOLD }}
+          ENERGY_R2_THRESHOLD: ${{ env.ENERGY_R2_THRESHOLD }}
+        run: python scripts/energy/validate_model.py
+
+      - name: Bias detection
+        env:
+          ENERGY_FEATURES_PATH: ${{ github.workspace }}/data/processed/daily_joined.parquet
+          MLFLOW_TRACKING_URI: sqlite:///${{ github.workspace }}/data/models/energy/mlflow.db
+        run: python scripts/energy/model_bias_detection.py
+
+      - name: SHAP sensitivity analysis
+        env:
+          ENERGY_FEATURES_PATH: ${{ github.workspace }}/data/processed/daily_joined.parquet
+          MLFLOW_TRACKING_URI: sqlite:///${{ github.workspace }}/data/models/energy/mlflow.db
+        run: python scripts/energy/sensitivity_analysis.py
+
+      - name: Display metrics summary
+        run: |
+          python - <<'PYEOF'
+          import json
+          from pathlib import Path
+
+          meta = Path("data/models/energy/training_metadata.json")
+          val  = Path("data/models/energy/reports/validation_report.json")
+          bias = Path("data/models/energy/reports/bias_detection_report.json")
+
+          if meta.exists():
+              m = json.loads(meta.read_text())
+              print(f"Winner:    {m.get('best_model_type')}")
+              print(f"CV MAE:    {m.get('cv_mae'):.4f}")
+              print(f"Test MAE:  {m.get('test_mae'):.4f}")
+              print(f"Test RMSE: {m.get('test_rmse'):.4f}")
+              print(f"Test R²:   {m.get('test_r2'):.4f}")
+
+          if val.exists():
+              v = json.loads(val.read_text())
+              print(f"\nValidation: {v.get('status')}")
+              for gate, info in v.get('gates', {}).items():
+                  icon = "✅" if info['passed'] else "❌"
+                  print(f"  {icon} {gate}: {info['actual']:.4f} (threshold {info['threshold']})")
+
+          if bias.exists():
+              b = json.loads(bias.read_text())
+              flagged = b.get('flagged_slices', [])
+              print(f"\nBias flags: {len(flagged)}" + (f" — {flagged}" if flagged else " (none)"))
+          PYEOF
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: energy-model-${{ github.sha }}
+          path: |
+            data/models/energy/best_model.joblib
+            data/models/energy/training_metadata.json
+            data/models/energy/reports/
+            data/models/energy/plots/
+          retention-days: 30
+
+      - name: Notify Slack — training result
+        if: always()
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          python - <<'PYEOF'
+          import json, os, urllib.request
+          from pathlib import Path
+
+          url = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not url:
+              print("No SLACK_WEBHOOK_URL — skipping.")
+              raise SystemExit(0)
+
+          try:
+              meta  = json.loads(Path("data/models/energy/training_metadata.json").read_text())
+              val   = json.loads(Path("data/models/energy/reports/validation_report.json").read_text())
+              status = ":large_green_circle: PASSED" if val["status"] == "PASS" else ":red_circle: FAILED"
+              text = (
+                  f"*Energy Model CI — {status}*\n"
+                  "Commit: `" + "${{ github.sha }}"[:8] + "`\n"
+                  f"Winner: {meta['best_model_type']}\n"
+                  f"Test MAE: `{meta['test_mae']:.4f}` | R²: `{meta['test_r2']:.4f}`"
+              )
+          except Exception as e:
+              text = f":fire: Energy Model CI — ERROR: {e}"
+
+          req = urllib.request.Request(
+              url, json.dumps({"text": text}).encode(),
+              {"Content-Type": "application/json"}, method="POST"
+          )
+          try:
+              urllib.request.urlopen(req, timeout=10)
+          except Exception as e:
+              print(f"Slack skipped: {e}")
+          PYEOF
+
+  # ── 3. Export + push to GCS (main branch only) ──────────────────────────────
+  deploy:
+    name: Export and push energy model
+    runs-on: ubuntu-latest
+    needs: train
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    timeout-minutes: 15
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Configure gsutil credentials
+        run: |
+          gcloud auth activate-service-account \
+            --key-file="${GOOGLE_APPLICATION_CREDENTIALS}"
+          gcloud config set project level-up-dev-486617
+
+      - name: Download model artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: energy-model-${{ github.sha }}
+          path: data/models/energy/
+
+      - name: Rollback check against deployed model
+        env:
+          GCS_BACKUP_BUCKET: ${{ vars.GCS_BACKUP_BUCKET }}
+        run: |
+          python - <<'PYEOF'
+          import json, os, subprocess, sys
+          from pathlib import Path
+
+          bucket = os.environ["GCS_BACKUP_BUCKET"]
+          meta   = json.loads(Path("data/models/energy/training_metadata.json").read_text())
+          new_mae = meta["test_mae"]
+
+          result = subprocess.run(
+              ["gsutil", "cat", f"gs://{bucket}/model_registry/energy/latest.json"],
+              capture_output=True, text=True
+          )
+          if result.returncode != 0:
+              print("No previous energy model in registry — first deploy, skipping rollback check.")
+              sys.exit(0)
+
+          prev      = json.loads(result.stdout)
+          prev_mae  = float(prev.get("test_mae", float("inf")))
+          threshold = prev_mae * 1.10
+
+          print(f"Previous MAE: {prev_mae:.4f}")
+          print(f"New MAE:      {new_mae:.4f}")
+          print(f"Threshold:    {threshold:.4f}")
+
+          if new_mae > threshold:
+              print(f"ROLLBACK: new model is {(new_mae/prev_mae - 1)*100:.1f}% worse. Blocking deploy.")
+              sys.exit(1)
+          print("Rollback check PASSED.")
+          PYEOF
+
+      - name: Export model to JSON weights
+        env:
+          GCS_BACKUP_BUCKET: ${{ vars.GCS_BACKUP_BUCKET }}
+        run: python scripts/energy/export_model.py
+
+      - name: Push to GCS registry
+        env:
+          GCS_BACKUP_BUCKET: ${{ vars.GCS_BACKUP_BUCKET }}
+          MLFLOW_TRACKING_URI: sqlite:///${{ github.workspace }}/data/models/energy/mlflow.db
+        run: python scripts/energy/registry_push.py
+
+      - name: Notify Slack — deploy result
+        if: always()
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          python - <<'PYEOF'
+          import json, os, urllib.request
+
+          url = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not url:
+              print("No SLACK_WEBHOOK_URL — skipping.")
+              raise SystemExit(0)
+
+          status    = ":rocket: Deployed" if "${{ job.status }}" == "success" else ":fire: Deploy Failed"
+          sha_short = "${{ github.sha }}"[:8]
+          text      = f"*Energy Model — {status}*\nCommit: `{sha_short}`"
+
+          req = urllib.request.Request(
+              url, json.dumps({"text": text}).encode(),
+              {"Content-Type": "application/json"}, method="POST"
+          )
+          try:
+              urllib.request.urlopen(req, timeout=10)
+          except Exception as e:
+              print(f"Slack skipped: {e}")
+          PYEOF

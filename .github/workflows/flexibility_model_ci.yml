@@ -52,7 +52,7 @@ env:
   MODEL_RMSE_THRESHOLD: ${{ github.event.inputs.rmse_threshold || vars.MODEL_RMSE_THRESHOLD || '10.0' }}
 
 jobs:
-  # ── 1. Lint & unit tests ────────────────────────────────────────────────────
+  #  1. Lint & unit tests 
   test:
     name: Lint and unit tests
     runs-on: ubuntu-latest
@@ -79,7 +79,7 @@ jobs:
       - name: Run unit tests
         run: pytest tests/ -v --tb=short -m "not slow"
 
-  # ── 2. Train, validate, bias check ─────────────────────────────────────────
+  #  2. Train, validate, bias check 
   train:
     name: Train and validate model
     runs-on: ubuntu-latest
@@ -252,7 +252,7 @@ jobs:
               print(f"Slack notification skipped: {e}")
           PYEOF
 
-  # ── 3. Push to registry (main branch only) ──────────────────────────────────
+  #  3. Push to registry (main branch only) 
   deploy:
     name: Push to GCS model registry
     runs-on: ubuntu-latest

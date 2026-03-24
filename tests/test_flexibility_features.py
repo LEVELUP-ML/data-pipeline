@@ -74,7 +74,7 @@ class TestSlope:
         assert _slope([1.0, 3.0, 5.0, 7.0, 9.0]) == pytest.approx(2.0, abs=0.01)
 
 
-#  _future_score ─
+#  _future_score 
 
 class TestFutureScore:
     def _series(self, n=30, base=50.0, step=0.5):

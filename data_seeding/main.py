@@ -48,7 +48,7 @@ from datetime import datetime, timedelta, timezone
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-#  Constants ─
+#  Constants 
 
 METRICS = ["strength", "stamina", "speed", "flexibility", "intelligence"]
 TOPICS  = ["Biology", "Chemistry", "Physics", "Math", "History", "CS", "English"]
@@ -71,7 +71,7 @@ STREAK_BONUS_PER_DAY = 0.08
 MAX_STREAK_BONUS    = 0.40
 
 
-#  Utility ─
+#  Utility 
 
 def rand_uid(n: int = 28) -> str:
     return "".join(random.choice(string.ascii_letters + string.digits) for _ in range(n))
@@ -126,7 +126,7 @@ def apply_rest_decay(score: float, rest_days: int) -> float:
     return clamp(score - effective_rest * DECAY_PER_REST_DAY)
 
 
-#  Component derivations ─
+#  Component derivations 
 
 def flexibility_components(score: float, duration_min: int, effort_level: int) -> dict:
     """Derive measurable flexibility sub-scores from the composite score."""
@@ -176,7 +176,7 @@ def metric_sources(metric: str) -> list:
     return ["manual"]
 
 
-#  Firestore helpers ─
+#  Firestore helpers 
 
 def init_firestore(service_account_path: str):
     cred = credentials.Certificate(service_account_path)
@@ -278,7 +278,7 @@ def seed_history(
         batch.commit()
 
 
-#  NEW: flexibility_workouts subcollection ─
+#  NEW: flexibility_workouts subcollection 
 
 def seed_flexibility_workouts(
     db,
@@ -432,7 +432,7 @@ def seed_sleep_logs(db, uid: str, start_day: datetime, days: int):
         batch.commit()
 
 
-#  Quiz attempts ─
+#  Quiz attempts 
 
 def seed_quiz_attempts(db, uid: str, start_day: datetime, days: int):
     col = db.collection("users").document(uid).collection("quiz_attempts")
@@ -488,7 +488,7 @@ def generate_profile() -> dict:
     }
 
 
-#  Entry point ─
+#  Entry point 
 
 def main():
     parser = argparse.ArgumentParser()

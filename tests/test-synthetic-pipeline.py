@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 
-# ── Inline functions (mirrors scripts/) ─────────────────────────────────────
+#  Inline functions (mirrors scripts/) 
 
 
 # preprocess_sleep.py
@@ -164,7 +164,7 @@ def validate_records(records, schema, name):
     return errors
 
 
-# ── Fixtures ────────────────────────────────────────────────────────────────
+#  Fixtures 
 
 
 @pytest.fixture
@@ -188,7 +188,7 @@ def joined_df():
     )
 
 
-# ── Sleep Preprocessing Tests ───────────────────────────────────────────────
+#  Sleep Preprocessing Tests 
 
 
 class TestParseTimeToMinutes:
@@ -212,7 +212,7 @@ class TestParseTimeToMinutes:
         assert np.isnan(parse_time_to_minutes("12"))
 
 
-# ── BMR Tests ───────────────────────────────────────────────────────────────
+#  BMR Tests 
 
 
 class TestComputeBMR:
@@ -238,7 +238,7 @@ class TestComputeBMR:
         assert compute_bmr(25, "Male", 175, None) is None
 
 
-# ── INT Score Tests ─────────────────────────────────────────────────────────
+#  INT Score Tests 
 
 
 class TestComputeIntScore:
@@ -268,7 +268,7 @@ class TestComputeIntScore:
         assert score == pytest.approx(expected, abs=0.1)
 
 
-# ── Anomaly Detection Tests ─────────────────────────────────────────────────
+#  Anomaly Detection Tests 
 
 
 class TestDetectAnomalies:
@@ -321,7 +321,7 @@ class TestDetectAnomalies:
         assert anomalies == []
 
 
-# ── Bias / Age Bucket Tests ─────────────────────────────────────────────────
+#  Bias / Age Bucket Tests 
 
 
 class TestAssignAgeBucket:
@@ -355,7 +355,7 @@ class TestAssignAgeBucket:
         assert assign_age_bucket(0) == "<20"
 
 
-# ── Schema Validation Tests ─────────────────────────────────────────────────
+#  Schema Validation Tests 
 
 
 class TestValidateRecords:

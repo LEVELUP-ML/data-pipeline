@@ -1,0 +1,11 @@
+data/
+logs/
+.git/
+.dvc/
+__pycache__/
+*.pyc
+*.pyo
+.env
+secrets/
+plugins/
+*.zip
