@@ -33,24 +33,33 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger(__name__)
 
 
-def _make_explainer(model, X_sample):
-    import shap
+def _get_importance(model, X_sample, feature_names):
+    """
+    Get feature importance array and method name.
 
-    # Patch XGBoost base_score if it's stored in a format SHAP can't parse
-    # e.g. '[5.4755775E1]' — known bug in SHAP with certain XGBoost versions
+    Uses SHAP TreeExplainer for RandomForest. For XGBoost, falls back to
+    feature_importances_ due to a known SHAP/XGBoost base_score
+    incompatibility where base_score is stored as '[5.47E1]' format.
+    """
     try:
         import xgboost
-        if isinstance(model, xgboost.XGBRegressor):
-            booster = model.get_booster()
-            config = json.loads(booster.save_config())
-            raw = config["learner"]["learner_model_param"]["base_score"]
-            # Strip brackets and parse scientific notation
-            cleaned = raw.strip("[]")
-            booster.set_param("base_score", str(float(cleaned)))
-    except Exception as patch_err:
-        log.warning("Could not patch XGBoost base_score: %s", patch_err)
+        is_xgb = isinstance(model, xgboost.XGBRegressor)
+    except ImportError:
+        is_xgb = False
 
-    return shap.TreeExplainer(model)
+    if is_xgb:
+        log.warning(
+            "Skipping SHAP TreeExplainer for XGBoost due to known base_score "
+            "incompatibility — using feature_importances_ instead."
+        )
+        return model.feature_importances_, "xgboost_feature_importances"
+
+    import shap
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(X_sample)
+    log.info("SHAP values computed successfully")
+    return np.abs(shap_values).mean(axis=0), "shap"
+
 
 def main():
     """Run SHAP sensitivity analysis."""
@@ -62,10 +71,10 @@ def main():
     # Load model and data
     model = joblib.load(BEST_MODEL_PATH)
     X, y, df, feature_names = load_and_prepare_data()
-    log.info("Computing SHAP values for %d samples, %d features...", len(X), len(feature_names))
+    log.info("Computing feature importance for %d samples, %d features...", len(X), len(feature_names))
 
     try:
-        import shap
+        import shap  # noqa: F401 — ensure shap is installed before proceeding
 
         # Sample data if too large (SHAP can be slow)
         if len(X) > 1000:
@@ -74,24 +83,19 @@ def main():
         else:
             X_sample = X
 
-        explainer = _make_explainer(model, X_sample)
-        shap_values = explainer.shap_values(X_sample)
-        log.info("SHAP values computed successfully")
+        importance_array, method = _get_importance(model, X_sample, feature_names)
 
-        # Feature importance (mean absolute SHAP)
-        importance = np.abs(shap_values).mean(axis=0)
         importance_dict = {
-            feature_names[i]: round(float(importance[i]), 4)
+            feature_names[i]: round(float(importance_array[i]), 4)
             for i in range(len(feature_names))
         }
-        # Sort by importance
         importance_sorted = dict(sorted(importance_dict.items(), key=lambda x: x[1], reverse=True))
 
-        log.info("Feature importance ranking:")
+        log.info("Feature importance ranking (method=%s):", method)
         for rank, (feat, imp) in enumerate(importance_sorted.items(), 1):
             log.info("  %d. %s: %.4f", rank, feat, imp)
 
-        # Generate SHAP summary bar plot
+        # Generate summary bar plot
         fig, ax = plt.subplots(figsize=(10, 6))
         features_sorted = list(importance_sorted.keys())
         values_sorted = list(importance_sorted.values())
@@ -100,34 +104,40 @@ def main():
         ax.barh(range(len(features_sorted)), values_sorted[::-1], color=colors[::-1])
         ax.set_yticks(range(len(features_sorted)))
         ax.set_yticklabels(features_sorted[::-1])
-        ax.set_xlabel("Mean |SHAP value|")
-        ax.set_title("Feature Importance (SHAP)")
+        ax.set_xlabel("Mean |SHAP value|" if method == "shap" else "Feature Importance")
+        ax.set_title("Feature Importance (SHAP)" if method == "shap" else "Feature Importance (XGBoost)")
         plt.tight_layout()
 
         bar_path = PLOTS_DIR / "shap_importance_bar.png"
         fig.savefig(bar_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        log.info("Saved SHAP bar plot → %s", bar_path)
+        log.info("Saved importance bar plot → %s", bar_path)
 
-        # Generate SHAP beeswarm plot
-        try:
-            plt.figure(figsize=(12, 8))
-            shap.summary_plot(
-                shap_values, X_sample,
-                feature_names=feature_names,
-                show=False,
-            )
-            beeswarm_path = PLOTS_DIR / "shap_beeswarm.png"
-            plt.savefig(beeswarm_path, dpi=150, bbox_inches="tight")
-            plt.close()
-            log.info("Saved SHAP beeswarm plot → %s", beeswarm_path)
-        except Exception as e:
-            log.warning("Could not generate beeswarm plot: %s", e)
-            beeswarm_path = None
+        # Generate SHAP beeswarm plot (only available when using SHAP)
+        beeswarm_path = None
+        if method == "shap":
+            try:
+                import shap as shap_mod
+                explainer = shap_mod.TreeExplainer(model)
+                shap_values = explainer.shap_values(X_sample)
+                plt.figure(figsize=(12, 8))
+                shap_mod.summary_plot(
+                    shap_values, X_sample,
+                    feature_names=feature_names,
+                    show=False,
+                )
+                beeswarm_path = PLOTS_DIR / "shap_beeswarm.png"
+                plt.savefig(beeswarm_path, dpi=150, bbox_inches="tight")
+                plt.close()
+                log.info("Saved SHAP beeswarm plot → %s", beeswarm_path)
+            except Exception as e:
+                log.warning("Could not generate beeswarm plot: %s", e)
+                beeswarm_path = None
 
         # Save report
         report = {
             "timestamp": pd.Timestamp.now().isoformat(),
+            "method": method,
             "n_samples_analyzed": len(X_sample),
             "n_features": len(feature_names),
             "feature_importance": importance_sorted,
@@ -155,7 +165,6 @@ def main():
     except ImportError:
         log.warning("SHAP not installed. Falling back to sklearn feature_importances_.")
 
-        # Fallback: use built-in feature importances
         if hasattr(model, "feature_importances_"):
             importance = model.feature_importances_
             importance_dict = {
