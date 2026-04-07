@@ -1,0 +1,94 @@
+name: DAG Integrity
+
+# Validates all Airflow DAG files for:
+#   - Import errors (syntax, missing deps)
+#   - Unique dag_ids
+#   - Required tags per category
+#   - Correct schedule settings
+#   - Expected task names in key DAGs
+#
+# Runs on any push that touches a DAG file or this workflow.
+# Also runs on PRs to main so broken DAGs are caught before merge.
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "dags/**"
+      - "requirements.txt"
+      - "tests/test_dag_integrity.py"
+      - ".github/workflows/dag_integrity.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "dags/**"
+      - "tests/test_dag_integrity.py"
+  workflow_dispatch:
+
+env:
+  AIRFLOW_HOME: ${{ github.workspace }}
+  # Suppress Airflow's DB init warning — we don't need a DB for import tests
+  AIRFLOW__CORE__UNIT_TEST_MODE: "true"
+  AIRFLOW__LOGGING__LOGGING_LEVEL: "ERROR"
+
+jobs:
+  dag-integrity:
+    name: DAG structural tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install project dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install apache-airflow
+        # Pin to the same version used in the Docker image (Dockerfile: apache/airflow:2.9.3-python3.11)
+        # Constraint file prevents pip from downgrading Airflow's pinned transitive deps.
+        run: |
+          pip install \
+            "apache-airflow==2.9.3" \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.9.3/constraints-3.11.txt"
+
+      - name: Stub secrets for import-time Variable lookups
+        # Some DAG files call Variable.get() at import time.
+        # Set them as env vars so Airflow resolves them without a running DB.
+        run: |
+          cat >> $GITHUB_ENV << 'EOF'
+          AIRFLOW_VAR_GCS_BACKUP_BUCKET=ci-stub
+          AIRFLOW_VAR_FIREBASE_SERVICE_ACCOUNT_PATH=/tmp/stub.json
+          AIRFLOW_VAR_BACKUP_PREFIX=stub
+          AIRFLOW_VAR_MAX_DOCS_PER_RUN=1000
+          AIRFLOW_VAR_CHUNK_SIZE=100
+          AIRFLOW_VAR_ALERT_WEBHOOK_URL=https://example.com/stub
+          AIRFLOW_VAR_MODEL_RMSE_THRESHOLD=10.0
+          AIRFLOW_VAR_BIAS_MAX_RMSE_RATIO=2.0
+          AIRFLOW_VAR_FLEXIBILITY_RMSE_THRESHOLD=10.0
+          AIRFLOW_VAR_STRENGTH_RMSE_THRESHOLD=2000.0
+          KAGGLE_USERNAME=ci
+          KAGGLE_KEY=ci
+          EOF
+          echo '{}' > /tmp/stub.json
+
+      - name: Run DAG integrity tests
+        run: |
+          PYTHONPATH=dags pytest tests/test_dag_integrity.py -v --tb=short
+
+      - name: Check for import errors via Airflow CLI
+        # Secondary check: Airflow's own parser catches issues pytest might miss
+        # (e.g. DAGs registered via DagBag but not as module-level variables).
+        run: |
+          airflow db init 2>/dev/null || true
+          airflow dags list 2>&1 | tee /tmp/dag_list.txt
+          if grep -i "import_error\|broken" /tmp/dag_list.txt; then
+            echo "Airflow reported import errors — check above output"
+            exit 1
+          fi
+          echo "All DAGs loaded cleanly via Airflow CLI"

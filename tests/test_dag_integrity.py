@@ -27,6 +27,18 @@ from typing import Dict, List
 
 import pytest
 
+# Skip the entire module when apache-airflow is not installed.
+# Model CI workflows (strength, flexibility, energy) do not install Airflow;
+# DAG integrity is validated by the dedicated dag_integrity.yml workflow.
+# To run locally: pip install apache-airflow==2.9.3
+pytest.importorskip(
+    "airflow",
+    reason=(
+        "apache-airflow is not installed. "
+        "Run the dag-integrity workflow or install airflow locally."
+    ),
+)
+
 # ── DAG loader ────────────────────────────────────────────────────────────────
 
 DAG_ROOT = Path(__file__).parent.parent / "dags"
