@@ -15,11 +15,10 @@ Output: data/processed/food/
 from __future__ import annotations
 
 import json
-import os
 import random
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import pandas as pd
 from sklearn.model_selection import train_test_split

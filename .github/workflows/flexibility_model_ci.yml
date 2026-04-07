@@ -73,6 +73,7 @@ jobs:
         run: |
           docker run --rm \
             --entrypoint "" \
+            --user 0 \
             -v "$PWD:/opt/airflow/workspace" \
             -w /opt/airflow/workspace \
             -e RUFF_CACHE_DIR=/tmp/ruff_cache \

@@ -24,7 +24,6 @@ import pickle
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -47,7 +46,8 @@ except ImportError:
     sys.exit("shap missing. Add to requirements.txt and rebuild.")
 
 try:
-    import mlflow, mlflow.sklearn
+    import mlflow
+    import mlflow.sklearn
     MLFLOW_OK = True
 except ImportError:
     MLFLOW_OK = False

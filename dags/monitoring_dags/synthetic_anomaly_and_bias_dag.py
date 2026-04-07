@@ -15,13 +15,11 @@ import os
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
-import numpy as np
 import pandas as pd
 from airflow import DAG
 from airflow.decorators import task
-from airflow.exceptions import AirflowFailException
 from airflow.models import Variable
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from dag_monitoring import (

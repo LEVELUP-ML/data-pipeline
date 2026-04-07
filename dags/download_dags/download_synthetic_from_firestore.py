@@ -18,7 +18,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from airflow import DAG
 from airflow.decorators import task

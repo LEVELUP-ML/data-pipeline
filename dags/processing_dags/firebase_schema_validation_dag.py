@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import os
 import re
-from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List
 
 import pendulum
 from airflow import DAG
@@ -17,7 +16,6 @@ from airflow.operators.python import get_current_context
 import firebase_admin
 from firebase_admin import credentials, firestore
 from google.cloud.firestore_v1 import FieldFilter
-from datetime import datetime
 from dag_monitoring import (
     monitored_dag_args,
     on_dag_failure_callback,

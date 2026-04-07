@@ -13,8 +13,6 @@ Triggers strength_model DAG on success.
 
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -24,7 +22,6 @@ import pendulum
 from airflow import DAG
 from airflow.decorators import task
 from airflow.exceptions import AirflowFailException
-from airflow.models import Variable
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 from dag_monitoring import (

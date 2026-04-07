@@ -204,7 +204,6 @@ with DAG(
     @task()
     def validate_model(test_mae: float):
         """Validate model against MAE and R² gates."""
-        import json
 
         sys.path.insert(0, str(SCRIPTS))
         mod = _load("validate_model.py")

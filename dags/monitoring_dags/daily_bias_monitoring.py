@@ -17,7 +17,6 @@ import glob
 from datetime import datetime
 from typing import Any, Dict, List
 
-import numpy as np
 import pandas as pd
 import urllib.request
 from airflow import DAG
@@ -292,7 +291,7 @@ with DAG(
         # WISDM section
         w = report.get("wisdm", {})
         if w.get("available"):
-            lines = [f"*WISDM Accelerometer / Stamina*"]
+            lines = ["*WISDM Accelerometer / Stamina*"]
             lines.append(
                 f"File: `{w.get('file', 'N/A')}` | Rows: {w.get('total_rows', 0):,}"
             )

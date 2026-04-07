@@ -243,7 +243,7 @@ def plot_score_distributions():
         print("  WARNING: pandas not available — skipping plot 07")
         return
     if not FEATURES_PATH.exists():
-        print(f"  WARNING: feature file not found — skipping plot 07")
+        print("  WARNING: feature file not found — skipping plot 07")
         return
 
     df     = pd.read_parquet(str(FEATURES_PATH))
