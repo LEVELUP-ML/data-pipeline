@@ -65,6 +65,9 @@ jobs:
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
+      - name: Ensure files are readable inside container
+        run: chmod -R a+r scripts/
+
       - name: Lint energy scripts
         run: |
           docker run --rm \

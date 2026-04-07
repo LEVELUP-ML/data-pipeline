@@ -64,6 +64,11 @@ jobs:
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
+      - name: Ensure files are readable inside container
+        # The runner checks out as uid 0; the container runs as airflow (uid 1000).
+        # Files checked out with mode 600/640 are unreadable by the container user.
+        run: chmod -R a+r dags/ scripts/
+
       - name: Lint (ruff)
         run: |
           docker run --rm \
