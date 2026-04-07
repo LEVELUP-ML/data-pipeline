@@ -160,7 +160,7 @@ def eval_per_horizon(model, X, Y, label):
     return result
 
 
-# ── Three architectures ───────────────────────────────────────────────────────
+#  Three architectures 
 
 def build_ridge(X_train, Y_train):
     print("\n--- Ridge regression (baseline) ---")
@@ -230,7 +230,7 @@ def hyperparam_sensitivity(cv_results):
         return {"available": False}
 
 
-# ── Bias analysis ─────────────────────────────────────────────────────────────
+#  Bias analysis 
 
 def run_bias(model, test_df, X_test, Y_test):
     if not FAIRLEARN_OK:
@@ -285,7 +285,7 @@ def run_bias(model, test_df, X_test, Y_test):
     return report
 
 
-# ── SHAP ──────────────────────────────────────────────────────────────────────
+#  SHAP 
 
 def run_shap(model, X_train, horizon_idx=2):
     try:
@@ -320,7 +320,7 @@ def run_shap(model, X_train, horizon_idx=2):
         return {}
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+#  Main 
 
 def train(run_id=None, model_type="flexibility"):
     global FEATURES_PATH, MODELS_DIR, MODEL_PATH, METRICS_PATH, BIAS_PATH, SHAP_PATH
@@ -369,7 +369,7 @@ def train(run_id=None, model_type="flexibility"):
             active_run = None
 
     try:
-        # ── Train all three architectures ─────────────────────────────────────
+        #  Train all three architectures 
         models = {}
 
         ridge_model                    = build_ridge(X_train, Y_train)
@@ -381,13 +381,13 @@ def train(run_id=None, model_type="flexibility"):
         xgb_model, best_params, cv_res = build_xgboost(X_train, Y_train)
         models["XGBoost"]              = xgb_model
 
-        # ── Evaluate each ─────────────────────────────────────────────────────
+        #  Evaluate each 
         comparison = {}
         for name, model in models.items():
             print(f"\nEvaluating {name}...")
             comparison[name] = eval_per_horizon(model, X_test, Y_test, name)
 
-        # ── Select winner by d7 RMSE ──────────────────────────────────────────
+        #  Select winner by d7 RMSE 
         winner_name  = min(comparison, key=lambda n: comparison[n]["d7"]["rmse"])
         winner_model = models[winner_name]
         print(f"\nWinner: {winner_name} (d7 RMSE={comparison[winner_name]['d7']['rmse']:.4f})")
@@ -404,7 +404,7 @@ def train(run_id=None, model_type="flexibility"):
         print("\nRunning bias analysis...")
         bias_report = run_bias(winner_model, test_df, X_test, Y_test)
 
-        # ── Log to MLflow ─────────────────────────────────────────────────────
+        #  Log to MLflow 
         if MLFLOW_OK and active_run:
             try:
                 mlflow.log_param("winner_model", winner_name)
@@ -428,7 +428,7 @@ def train(run_id=None, model_type="flexibility"):
             except Exception as e:
                 print(f"WARNING: MLflow logging failed ({e}) — artifacts saved locally regardless.")
 
-        # ── Save artifacts ────────────────────────────────────────────────────
+        #  Save artifacts 
         with MODEL_PATH.open("wb") as f:
             pickle.dump(winner_model, f)
 

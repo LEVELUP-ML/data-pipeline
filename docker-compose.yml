@@ -52,6 +52,8 @@ x-airflow-common: &airflow-common
     - ./secrets:/opt/airflow/secrets
     - ./data_seeding:/opt/airflow/data_seeding
     - ./scripts:/opt/airflow/scripts
+    - ./tests:/opt/airflow/tests
+    - ./pytest.ini:/opt/airflow/pytest.ini
 
   depends_on:
     postgres:

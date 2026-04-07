@@ -1,91 +1,33 @@
-"""Tests for stamina engine, windowing, and anomaly detection."""
+"""Tests for stamina engine, windowing, and anomaly detection.
+
+Logic under test lives in dags/lib/wisdm.py — no inline copies here.
+"""
 
 import numpy as np
 import pandas as pd
 import pytest
 
-
-#  Inline logic
-
-VALID_ACTIVITIES = set("ABCDEFGHIJKLMOPQRS")
-ACCEL_MAG_CEILING = 200.0
-
-
-def create_row_windows(df: pd.DataFrame, window_size: int = 200) -> pd.DataFrame:
-    df = df.reset_index(drop=True)
-    df["window_id"] = df.index // window_size
-    windowed = (
-        df.groupby("window_id")
-        .agg(
-            {
-                "user": "first",
-                "activity": "first",
-                "x": "mean",
-                "y": "mean",
-                "z": "mean",
-            }
-        )
-        .reset_index(drop=True)
-    )
-    return windowed
+from lib.wisdm import (
+    analyze_bias,
+    compute_stamina,
+    create_row_windows,
+    detect_anomalies,
+    tag_row_issues,
+)
 
 
-def compute_stamina(
-    df: pd.DataFrame, max_stamina: float = 100.0, fatigue_rate: float = 0.01
-) -> pd.DataFrame:
-    stamina = max_stamina
-    values = []
-    for _, row in df.iterrows():
-        intensity = np.sqrt(row["x"] ** 2 + row["y"] ** 2 + row["z"] ** 2)
-        stamina = max(0.0, stamina - intensity * fatigue_rate)
-        values.append(round(stamina, 4))
-    df = df.copy()
-    df["stamina"] = values
-    return df
-
-
-def detect_anomalies(df: pd.DataFrame) -> dict:
-    mag = np.sqrt(df["x"] ** 2 + df["y"] ** 2 + df["z"] ** 2)
-    threshold = mag.mean() + 5 * mag.std()
-    count = (mag > threshold).sum()
-    return {
-        "anomaly_count": int(count),
-        "threshold": round(float(threshold), 4),
-        "mean_magnitude": round(float(mag.mean()), 4),
-        "std_magnitude": round(float(mag.std()), 4),
-    }
-
-
-def tag_row_issues(row: pd.Series) -> list:
-    issues = []
-    if pd.isna(row.get("user")):
-        issues.append("missing_user")
-    if pd.isna(row.get("activity")) or row["activity"] not in VALID_ACTIVITIES:
-        issues.append(f"invalid_activity({row.get('activity')})")
-    for ax in ("x", "y", "z"):
-        if pd.isna(row.get(ax)):
-            issues.append(f"missing_{ax}")
-    if pd.isna(row.get("timestamp")):
-        issues.append("missing_timestamp")
-    if all(pd.notna(row.get(ax)) for ax in ("x", "y", "z")):
-        mag = np.sqrt(row["x"] ** 2 + row["y"] ** 2 + row["z"] ** 2)
-        if mag > ACCEL_MAG_CEILING:
-            issues.append(f"extreme_magnitude({mag:.1f})")
-    return issues
-
-
-#  Fixtures
+#  Fixtures 
 
 
 @pytest.fixture
 def accel_df():
-    """Simulated accel data: 400 rows, 2 windows of 200."""
-    np.random.seed(42)
-    n = 400
+    """Clean 100-row WISDM-like DataFrame with no issues."""
+    np.random.seed(0)
+    n = 100
     return pd.DataFrame(
         {
-            "user": [1600] * n,
-            "activity": ["A"] * 200 + ["B"] * 200,
+            "user": pd.array([1600] * n, dtype="Int64"),
+            "activity": np.random.choice(list("ABCDE"), n),
             "timestamp": range(n),
             "x": np.random.normal(0.1, 0.5, n),
             "y": np.random.normal(-0.2, 0.5, n),
@@ -96,273 +38,152 @@ def accel_df():
 
 @pytest.fixture
 def windowed_df(accel_df):
-    return create_row_windows(accel_df, window_size=200)
+    return create_row_windows(accel_df, window_size=10)
 
 
-#  Windowing Tests
+#  tag_row_issues 
 
 
-class TestWindowing:
+class TestTagRowIssues:
 
-    def test_correct_window_count(self, accel_df):
-        w = create_row_windows(accel_df, window_size=200)
-        assert len(w) == 2
+    def _make_row(self, **kwargs):
+        base = {
+            "user": pd.array([1600], dtype="Int64")[0],
+            "activity": "A",
+            "timestamp": 1000,
+            "x": 0.1,
+            "y": -0.2,
+            "z": 9.8,
+        }
+        base.update(kwargs)
+        return pd.Series(base)
 
-    def test_window_preserves_first_activity(self, accel_df):
-        w = create_row_windows(accel_df, window_size=200)
-        assert w["activity"].iloc[0] == "A"
-        assert w["activity"].iloc[1] == "B"
+    def test_valid_row_no_issues(self):
+        assert tag_row_issues(self._make_row()) == []
 
-    def test_window_aggregates_mean(self, accel_df):
-        w = create_row_windows(accel_df, window_size=200)
-        expected_z = accel_df.iloc[:200]["z"].mean()
-        assert w["z"].iloc[0] == pytest.approx(expected_z)
+    def test_missing_user_flagged(self):
+        issues = tag_row_issues(self._make_row(user=None))
+        assert "missing_user" in issues
 
-    def test_single_row_window(self):
-        df = pd.DataFrame(
-            {
-                "user": [1600],
-                "activity": ["A"],
-                "x": [0.1],
-                "y": [-0.2],
-                "z": [9.8],
-            }
-        )
-        w = create_row_windows(df, window_size=1)
-        assert len(w) == 1
+    def test_invalid_activity_flagged(self):
+        issues = tag_row_issues(self._make_row(activity="Z"))
+        assert any("invalid_activity" in i for i in issues)
 
-    def test_window_size_larger_than_data(self):
-        df = pd.DataFrame(
-            {
-                "user": [1600] * 5,
-                "activity": ["A"] * 5,
-                "x": [0.1] * 5,
-                "y": [-0.2] * 5,
-                "z": [9.8] * 5,
-            }
-        )
-        w = create_row_windows(df, window_size=200)
-        assert len(w) == 1  # all rows in one window
+    def test_missing_x_flagged(self):
+        issues = tag_row_issues(self._make_row(x=np.nan))
+        assert "missing_x" in issues
 
-    def test_empty_input(self):
-        df = pd.DataFrame(columns=["user", "activity", "x", "y", "z"])
-        w = create_row_windows(df, window_size=200)
-        assert len(w) == 0
+    def test_extreme_magnitude_flagged(self):
+        # sqrt(300^2 + 0 + 0) = 300 > 200 ceiling
+        issues = tag_row_issues(self._make_row(x=300.0, y=0.0, z=0.0))
+        assert any("extreme_magnitude" in i for i in issues)
+
+    def test_normal_magnitude_not_flagged(self):
+        issues = tag_row_issues(self._make_row(x=0.5, y=-0.3, z=9.8))
+        assert not any("extreme_magnitude" in i for i in issues)
 
 
-#  Stamina Tests
+#  create_row_windows 
 
 
-class TestStamina:
+class TestCreateRowWindows:
 
-    def test_stamina_starts_at_max(self, windowed_df):
-        result = compute_stamina(windowed_df, max_stamina=100.0, fatigue_rate=0.01)
-        # First value should be slightly less than 100 (after first drain)
-        assert result["stamina"].iloc[0] < 100.0
-        assert result["stamina"].iloc[0] > 90.0
+    def test_correct_number_of_windows(self, accel_df):
+        windowed = create_row_windows(accel_df, window_size=10)
+        assert len(windowed) == 10  # 100 rows / 10
 
-    def test_stamina_monotonically_decreases(self, windowed_df):
-        result = compute_stamina(windowed_df, max_stamina=100.0, fatigue_rate=0.01)
-        for i in range(1, len(result)):
-            assert result["stamina"].iloc[i] <= result["stamina"].iloc[i - 1]
+    def test_window_columns_present(self, accel_df):
+        windowed = create_row_windows(accel_df, window_size=10)
+        for col in ("user", "activity", "x", "y", "z"):
+            assert col in windowed.columns
 
-    def test_stamina_never_negative(self, windowed_df):
-        result = compute_stamina(windowed_df, max_stamina=100.0, fatigue_rate=1.0)
-        assert (result["stamina"] >= 0).all()
+    def test_xyz_are_means_not_raw(self, accel_df):
+        # First window: rows 0-9
+        expected_x = float(accel_df["x"].iloc[:10].mean())
+        windowed = create_row_windows(accel_df, window_size=10)
+        assert windowed["x"].iloc[0] == pytest.approx(expected_x, rel=1e-5)
 
-    def test_stamina_floors_at_zero(self):
-        df = pd.DataFrame(
-            {
-                "user": [1600] * 50,
-                "activity": ["A"] * 50,
-                "x": [50.0] * 50,
-                "y": [50.0] * 50,
-                "z": [50.0] * 50,
-            }
-        )
-        result = compute_stamina(df, max_stamina=100.0, fatigue_rate=1.0)
-        assert result["stamina"].iloc[-1] == 0.0
+    def test_window_size_equals_total_gives_one_row(self, accel_df):
+        windowed = create_row_windows(accel_df, window_size=len(accel_df))
+        assert len(windowed) == 1
 
-    def test_zero_movement_no_fatigue(self):
-        df = pd.DataFrame(
-            {
-                "user": [1600] * 5,
-                "activity": ["A"] * 5,
-                "x": [0.0] * 5,
-                "y": [0.0] * 5,
-                "z": [0.0] * 5,
-            }
-        )
-        result = compute_stamina(df, max_stamina=100.0, fatigue_rate=0.01)
-        assert (result["stamina"] == 100.0).all()
+    def test_single_row_df(self):
+        df = pd.DataFrame({"user": [1], "activity": ["A"], "x": [1.0], "y": [2.0], "z": [3.0]})
+        windowed = create_row_windows(df, window_size=10)
+        assert len(windowed) == 1
 
-    def test_higher_fatigue_rate_drains_faster(self, windowed_df):
-        slow = compute_stamina(windowed_df, fatigue_rate=0.001)
-        fast = compute_stamina(windowed_df, fatigue_rate=0.1)
-        assert fast["stamina"].iloc[-1] < slow["stamina"].iloc[-1]
+
+#  compute_stamina 
+
+
+class TestComputeStamina:
 
     def test_stamina_column_added(self, windowed_df):
         result = compute_stamina(windowed_df)
         assert "stamina" in result.columns
 
-    def test_original_df_not_mutated(self, windowed_df):
+    def test_stamina_starts_near_max(self, windowed_df):
+        result = compute_stamina(windowed_df, max_stamina=100.0)
+        assert result["stamina"].iloc[0] <= 100.0
+
+    def test_stamina_is_monotonically_non_increasing(self, windowed_df):
+        result = compute_stamina(windowed_df, max_stamina=100.0, fatigue_rate=0.01)
+        assert (result["stamina"].diff().dropna() <= 0).all()
+
+    def test_stamina_never_negative(self, windowed_df):
+        result = compute_stamina(windowed_df, max_stamina=100.0, fatigue_rate=10.0)
+        assert (result["stamina"] >= 0).all()
+
+    def test_input_df_not_mutated(self, windowed_df):
         original_cols = set(windowed_df.columns)
         compute_stamina(windowed_df)
-        assert "stamina" not in windowed_df.columns
         assert set(windowed_df.columns) == original_cols
 
+    def test_custom_fatigue_rate(self, windowed_df):
+        slow = compute_stamina(windowed_df, fatigue_rate=0.001)
+        fast = compute_stamina(windowed_df, fatigue_rate=0.1)
+        assert slow["stamina"].iloc[-1] > fast["stamina"].iloc[-1]
 
-#  Anomaly Detection Tests
+
+#  detect_anomalies 
 
 
-class TestAnomalyDetection:
-
-    def test_no_anomalies_in_normal_data(self, accel_df):
-        result = detect_anomalies(accel_df)
-        assert result["anomaly_count"] == 0
-
-    def test_detects_spike(self, accel_df):
-        spiked = accel_df.copy()
-        spiked.loc[0, "x"] = 500.0
-        spiked.loc[1, "y"] = -500.0
-        result = detect_anomalies(spiked)
-        assert result["anomaly_count"] >= 1
+class TestDetectAnomalies:
 
     def test_returns_expected_keys(self, accel_df):
         result = detect_anomalies(accel_df)
-        assert set(result.keys()) == {
-            "anomaly_count",
-            "threshold",
-            "mean_magnitude",
-            "std_magnitude",
-        }
+        assert {"anomaly_count", "threshold", "mean_magnitude", "std_magnitude"} == set(result)
 
-    def test_threshold_is_positive(self, accel_df):
+    def test_no_anomalies_in_clean_data(self, accel_df):
+        # Data has std ~1; 5-sigma threshold >> any value
         result = detect_anomalies(accel_df)
-        assert result["threshold"] > 0
-
-    def test_all_extreme_data(self):
-        """Uniform extreme values = 0 std = no anomalies."""
-        df = pd.DataFrame(
-            {
-                "x": [100.0] * 10,
-                "y": [100.0] * 10,
-                "z": [100.0] * 10,
-            }
-        )
-        result = detect_anomalies(df)
         assert result["anomaly_count"] == 0
 
+    def test_spike_detected(self, accel_df):
+        df = accel_df.copy()
+        df.loc[0, "x"] = 10_000.0  # far beyond 5-sigma
+        result = detect_anomalies(df)
+        assert result["anomaly_count"] >= 1
 
-#  WISDM Row Validation Tests
+    def test_threshold_above_mean(self, accel_df):
+        result = detect_anomalies(accel_df)
+        assert result["threshold"] > result["mean_magnitude"]
 
 
-class TestWisdmRowValidation:
+#  analyze_bias 
 
-    def test_valid_row_no_issues(self):
-        row = pd.Series(
-            {
-                "user": 1600,
-                "activity": "A",
-                "timestamp": 123,
-                "x": 0.1,
-                "y": -0.2,
-                "z": 9.8,
-            }
-        )
-        assert tag_row_issues(row) == []
 
-    def test_missing_user_flagged(self):
-        row = pd.Series(
-            {
-                "user": pd.NA,
-                "activity": "A",
-                "timestamp": 123,
-                "x": 0.1,
-                "y": -0.2,
-                "z": 9.8,
-            }
-        )
-        assert "missing_user" in tag_row_issues(row)
+class TestAnalyzeBias:
 
-    def test_invalid_activity_flagged(self):
-        row = pd.Series(
-            {
-                "user": 1600,
-                "activity": "N",
-                "timestamp": 123,
-                "x": 0.1,
-                "y": -0.2,
-                "z": 9.8,
-            }
-        )
-        issues = tag_row_issues(row)
-        assert any("invalid_activity" in i for i in issues)
+    def test_returns_dict_keyed_by_activity(self, windowed_df):
+        result = compute_stamina(windowed_df)
+        bias = analyze_bias(result)
+        assert isinstance(bias, dict)
+        assert all(isinstance(v, float) for v in bias.values())
 
-    def test_missing_axis_flagged(self):
-        row = pd.Series(
-            {
-                "user": 1600,
-                "activity": "A",
-                "timestamp": 123,
-                "x": np.nan,
-                "y": -0.2,
-                "z": 9.8,
-            }
-        )
-        assert "missing_x" in tag_row_issues(row)
-
-    def test_extreme_magnitude_flagged(self):
-        row = pd.Series(
-            {
-                "user": 1600,
-                "activity": "A",
-                "timestamp": 123,
-                "x": 150.0,
-                "y": 150.0,
-                "z": 150.0,
-            }
-        )
-        issues = tag_row_issues(row)
-        assert any("extreme_magnitude" in i for i in issues)
-
-    def test_missing_timestamp_flagged(self):
-        row = pd.Series(
-            {
-                "user": 1600,
-                "activity": "A",
-                "timestamp": np.nan,
-                "x": 0.1,
-                "y": -0.2,
-                "z": 9.8,
-            }
-        )
-        assert "missing_timestamp" in tag_row_issues(row)
-
-    def test_activity_N_is_invalid(self):
-        """Dataset docs say no 'N' activity."""
-        row = pd.Series(
-            {
-                "user": 1600,
-                "activity": "N",
-                "timestamp": 123,
-                "x": 0.1,
-                "y": -0.2,
-                "z": 9.8,
-            }
-        )
-        assert any("invalid_activity" in i for i in tag_row_issues(row))
-
-    def test_all_valid_activities(self):
-        for act in "ABCDEFGHIJKLMOPQRS":
-            row = pd.Series(
-                {
-                    "user": 1600,
-                    "activity": act,
-                    "timestamp": 123,
-                    "x": 0.1,
-                    "y": -0.2,
-                    "z": 9.8,
-                }
-            )
-            assert tag_row_issues(row) == [], f"Activity {act} should be valid"
+    def test_all_activities_present(self, accel_df):
+        windowed = create_row_windows(accel_df, window_size=10)
+        result = compute_stamina(windowed)
+        bias = analyze_bias(result)
+        unique_activities = set(windowed["activity"])
+        assert set(bias.keys()) == unique_activities

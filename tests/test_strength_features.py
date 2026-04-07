@@ -73,7 +73,7 @@ def dag():
     return _load_dag_helpers()
 
 
-# ── _slope ────────────────────────────────────────────────────────────────────
+#  _slope 
 
 class TestSlope:
     def test_flat_series_returns_zero(self, dag):
@@ -95,7 +95,7 @@ class TestSlope:
         assert dag._slope([1.0, 3.0, 5.0, 7.0, 9.0]) == pytest.approx(2.0, abs=0.01)
 
 
-# ── _future_score ─────────────────────────────────────────────────────────────
+#  _future_score 
 
 class TestFutureScore:
     def _make_series(self, start="2026-01-01", n=30, base=100.0, step=1.0):
@@ -121,7 +121,7 @@ class TestFutureScore:
         assert dag._future_score([], [], pd.Timestamp("2026-01-01"), 7) is None
 
 
-# ── _bmr ──────────────────────────────────────────────────────────────────────
+#  _bmr 
 
 class TestBmr:
     def test_male_bmr(self, dag):
@@ -139,7 +139,7 @@ class TestBmr:
         assert dag._bmr(30, "female", 165, 60) is not None
 
 
-# ── _age_enc ──────────────────────────────────────────────────────────────────
+#  _age_enc 
 
 class TestAgeEnc:
     def test_under_20(self, dag):    assert dag._age_enc(17) == 0
@@ -152,7 +152,7 @@ class TestAgeEnc:
         assert dag._age_enc("old") == -1
 
 
-# ── Lag feature construction ──────────────────────────────────────────────────
+#  Lag feature construction 
 
 class TestLagFeatureConstruction:
     def _make_sessions_df(self, n_sessions=15, base_score=100.0):

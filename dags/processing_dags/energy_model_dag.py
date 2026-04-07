@@ -44,7 +44,7 @@ from dag_monitoring import (
     on_sla_miss_callback,
 )
 
-# ── Paths ──────────────────────────────────────────────────────────────────────
+#  Paths 
 RAW_CSV    = Path("/opt/airflow/data/raw/sleep_health/Sleep_health_and_lifestyle_dataset.csv")
 FEAT_PATH  = Path("/opt/airflow/data/processed/daily_joined.parquet")
 SCRIPTS    = Path("/opt/airflow/scripts/energy")
@@ -65,7 +65,7 @@ def _load(script_name: str):
     return mod
 
 
-# ── DAG ────────────────────────────────────────────────────────────────────────
+#  DAG 
 with DAG(
     dag_id="energy_model_dag",
     start_date=pendulum.datetime(2026, 2, 1, tz="America/New_York"),
@@ -103,7 +103,7 @@ with DAG(
 
         rng = np.random.default_rng(42)
 
-        # ── Map Kaggle columns → pipeline feature names ────────────────────
+        #  Map Kaggle columns → pipeline feature names 
         out = pd.DataFrame()
 
         out["user_id"]   = df["Person ID"].astype(str)
@@ -277,7 +277,7 @@ with DAG(
 
         print(f"Pushed to registry: {location}")
 
-    # ── Wire up the chain ──────────────────────────────────────────────────────
+    #  Wire up the chain 
     feat       = build_features()
     train_mae  = run_training(feat)
     val_status = validate_model(train_mae)

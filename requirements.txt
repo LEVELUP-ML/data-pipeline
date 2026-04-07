@@ -12,3 +12,4 @@ pyarrow>=14.0.0
 matplotlib>=3.8.0
 pendulum>=3.0.0
 ruff
+pytest

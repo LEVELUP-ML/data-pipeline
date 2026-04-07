@@ -49,7 +49,7 @@ env:
   ENERGY_R2_THRESHOLD: ${{ vars.ENERGY_R2_THRESHOLD || '0.7' }}
 
 jobs:
-  # ── 1. Lint & unit tests ────────────────────────────────────────────────────
+  #  1. Lint & unit tests 
   test:
     name: Lint and unit tests
     runs-on: ubuntu-latest
@@ -73,7 +73,7 @@ jobs:
       - name: Run energy model unit tests
         run: pytest tests/energy/ -v --tb=short
 
-  # ── 2. Train, validate, bias + SHAP ─────────────────────────────────────────
+  #  2. Train, validate, bias + SHAP 
   train:
     name: Train and validate energy model
     runs-on: ubuntu-latest
@@ -256,7 +256,7 @@ jobs:
               print(f"Slack skipped: {e}")
           PYEOF
 
-  # ── 3. Export + push to GCS (main branch only) ──────────────────────────────
+  #  3. Export + push to GCS (main branch only) 
   deploy:
     name: Export and push energy model
     runs-on: ubuntu-latest

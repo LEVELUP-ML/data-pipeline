@@ -68,7 +68,7 @@ with DAG(
     default_args=monitored_dag_args(retries=2, sla_minutes=15),
     on_failure_callback=on_dag_failure_callback,
     sla_miss_callback=on_sla_miss_callback,
-    tags=["download", "firestore", "synthetic"],
+    tags=["download", "firestore", "synthetic", "ingest"],
 ) as dag:
 
     @task

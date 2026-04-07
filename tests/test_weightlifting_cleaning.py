@@ -1,60 +1,21 @@
-"""Tests for weightlifting CSV cleaning logic."""
+"""Tests for weightlifting CSV cleaning logic.
 
-import pandas as pd
+Logic under test lives in dags/lib/weightlifting.py — no inline copies here.
+"""
+
 import numpy as np
+import pandas as pd
 import pytest
 
-#  Inline cleaning logic
-
-MAX_WEIGHT_KG = 700.0
-MAX_REPS = 200
-MAX_SET_ORDER = 100
-MAX_SECONDS = 36_000
-MAX_DISTANCE_M = 100_000
-REQUIRED_COLS = {"Date", "Workout Name", "Exercise Name", "Set Order", "Weight", "Reps"}
+from lib.weightlifting import (
+    REQUIRED_COLS,
+    clean_dataframe,
+    tag_row_issues,
+    validate_schema,
+)
 
 
-def tag_row_issues(row: pd.Series) -> list:
-    issues = []
-    if pd.isna(row.get("_parsed_date")):
-        issues.append("invalid_or_missing_date")
-    if pd.isna(row.get("Exercise Name")) or str(row["Exercise Name"]).strip() == "":
-        issues.append("missing_exercise_name")
-    if pd.isna(row.get("Workout Name")) or str(row["Workout Name"]).strip() == "":
-        issues.append("missing_workout_name")
-    so = row.get("Set Order")
-    if pd.isna(so):
-        issues.append("missing_set_order")
-    elif so < 1 or so > MAX_SET_ORDER:
-        issues.append(f"set_order_out_of_range({so})")
-    w = row.get("Weight")
-    if pd.notna(w):
-        if w < 0:
-            issues.append(f"negative_weight({w})")
-        elif w > MAX_WEIGHT_KG:
-            issues.append(f"weight_exceeds_max({w})")
-    r = row.get("Reps")
-    if pd.notna(r):
-        if r < 0:
-            issues.append(f"negative_reps({r})")
-        elif r > MAX_REPS:
-            issues.append(f"reps_exceeds_max({r})")
-    s = row.get("Seconds")
-    if pd.notna(s):
-        if s < 0:
-            issues.append(f"negative_seconds({s})")
-        elif s > MAX_SECONDS:
-            issues.append(f"seconds_exceeds_max({s})")
-    d = row.get("Distance")
-    if pd.notna(d):
-        if d < 0:
-            issues.append(f"negative_distance({d})")
-        elif d > MAX_DISTANCE_M:
-            issues.append(f"distance_exceeds_max({d})")
-    return issues
-
-
-#  Fixtures
+#  Fixtures 
 
 
 @pytest.fixture
@@ -78,13 +39,7 @@ def valid_df():
 def dirty_df():
     return pd.DataFrame(
         {
-            "Date": [
-                "2024-01-01",
-                "not-a-date",
-                "2024-01-03",
-                "2024-01-04",
-                "2024-01-05",
-            ],
+            "Date": ["2024-01-01", "not-a-date", "2024-01-03", "2024-01-04", "2024-01-05"],
             "Workout Name": ["Push", "", "Pull", "Legs", "Push"],
             "Exercise Name": ["Bench", "OHP", "", "Squat", "Bench"],
             "Set Order": pd.array([1, 2, 1, 0, 1], dtype="Int64"),
@@ -99,7 +54,7 @@ def dirty_df():
     )
 
 
-#  Tests
+#  tag_row_issues 
 
 
 class TestTagRowIssues:
@@ -109,53 +64,43 @@ class TestTagRowIssues:
             assert tag_row_issues(row) == []
 
     def test_invalid_date_flagged(self, dirty_df):
-        row = dirty_df.iloc[1]
-        issues = tag_row_issues(row)
+        issues = tag_row_issues(dirty_df.iloc[1])
         assert "invalid_or_missing_date" in issues
 
     def test_missing_workout_name_flagged(self, dirty_df):
-        row = dirty_df.iloc[1]
-        issues = tag_row_issues(row)
+        issues = tag_row_issues(dirty_df.iloc[1])
         assert "missing_workout_name" in issues
 
     def test_missing_exercise_name_flagged(self, dirty_df):
-        row = dirty_df.iloc[2]
-        issues = tag_row_issues(row)
+        issues = tag_row_issues(dirty_df.iloc[2])
         assert "missing_exercise_name" in issues
 
     def test_set_order_zero_flagged(self, dirty_df):
-        row = dirty_df.iloc[3]
-        issues = tag_row_issues(row)
+        issues = tag_row_issues(dirty_df.iloc[3])
         assert any("set_order_out_of_range" in i for i in issues)
 
     def test_negative_weight_flagged(self, dirty_df):
-        row = dirty_df.iloc[1]
-        issues = tag_row_issues(row)
+        issues = tag_row_issues(dirty_df.iloc[1])
         assert any("negative_weight" in i for i in issues)
 
     def test_weight_exceeds_max_flagged(self, dirty_df):
-        row = dirty_df.iloc[3]
-        issues = tag_row_issues(row)
+        issues = tag_row_issues(dirty_df.iloc[3])
         assert any("weight_exceeds_max" in i for i in issues)
 
     def test_negative_reps_flagged(self, dirty_df):
-        row = dirty_df.iloc[2]
-        issues = tag_row_issues(row)
+        issues = tag_row_issues(dirty_df.iloc[2])
         assert any("negative_reps" in i for i in issues)
 
     def test_reps_exceeds_max_flagged(self, dirty_df):
-        row = dirty_df.iloc[4]
-        issues = tag_row_issues(row)
+        issues = tag_row_issues(dirty_df.iloc[4])
         assert any("reps_exceeds_max" in i for i in issues)
 
     def test_negative_seconds_flagged(self, dirty_df):
-        row = dirty_df.iloc[3]
-        issues = tag_row_issues(row)
+        issues = tag_row_issues(dirty_df.iloc[3])
         assert any("negative_seconds" in i for i in issues)
 
     def test_distance_exceeds_max_flagged(self, dirty_df):
-        row = dirty_df.iloc[4]
-        issues = tag_row_issues(row)
+        issues = tag_row_issues(dirty_df.iloc[4])
         assert any("distance_exceeds_max" in i for i in issues)
 
     def test_null_optional_fields_no_issue(self):
@@ -172,67 +117,88 @@ class TestTagRowIssues:
                 "_parsed_date": pd.Timestamp("2024-01-01"),
             }
         )
-        issues = tag_row_issues(row)
-        assert issues == []
+        assert tag_row_issues(row) == []
 
 
-class TestSchemaCheck:
+#  validate_schema 
 
-    def test_required_columns_present(self, valid_df):
-        missing = REQUIRED_COLS - set(valid_df.columns)
-        assert len(missing) == 0
 
-    def test_missing_column_detected(self):
+class TestValidateSchema:
+
+    def test_valid_df_no_missing(self, valid_df):
+        assert validate_schema(valid_df) == set()
+
+    def test_detects_missing_columns(self):
         df = pd.DataFrame({"Date": [], "Weight": []})
-        missing = REQUIRED_COLS - set(df.columns)
+        missing = validate_schema(df)
         assert "Exercise Name" in missing
         assert "Set Order" in missing
 
 
-class TestDeduplication:
+#  clean_dataframe 
 
-    def test_duplicates_removed(self):
-        df = pd.DataFrame(
-            {
-                "Date": ["2024-01-01"] * 3,
-                "Workout Name": ["Push"] * 3,
-                "Exercise Name": ["Bench"] * 3,
-                "Set Order": [1, 1, 2],
-                "Weight": [80.0, 80.0, 85.0],
-                "Reps": [8, 8, 6],
-            }
+
+class TestCleanDataframe:
+
+    def _make_raw_df(self, rows):
+        """Build a minimal raw CSV-like DataFrame."""
+        return pd.DataFrame(
+            rows,
+            columns=["Date", "Workout Name", "Exercise Name", "Set Order", "Weight", "Reps"],
         )
-        deduped = df.drop_duplicates(
-            subset=[
-                "Date",
-                "Workout Name",
-                "Exercise Name",
-                "Set Order",
-                "Weight",
-                "Reps",
+
+    def test_clean_rows_survive(self):
+        df = self._make_raw_df(
+            [
+                ["2024-01-01", "Push", "Bench", 1, "80.0", "8"],
+                ["2024-01-01", "Push", "OHP", 2, "40.0", "10"],
             ]
         )
-        assert len(deduped) == 2
+        result = clean_dataframe(df)
+        assert len(result["clean"]) == 2
+        assert len(result["rejected"]) == 0
 
-    def test_no_false_dedup(self):
-        df = pd.DataFrame(
-            {
-                "Date": ["2024-01-01", "2024-01-01"],
-                "Workout Name": ["Push", "Push"],
-                "Exercise Name": ["Bench", "Bench"],
-                "Set Order": [1, 2],
-                "Weight": [80.0, 82.5],
-                "Reps": [8, 6],
-            }
-        )
-        deduped = df.drop_duplicates(
-            subset=[
-                "Date",
-                "Workout Name",
-                "Exercise Name",
-                "Set Order",
-                "Weight",
-                "Reps",
+    def test_dirty_rows_rejected(self):
+        df = self._make_raw_df(
+            [
+                ["not-a-date", "Push", "Bench", 1, "80.0", "8"],
+                ["2024-01-01", "Push", "Bench", 1, "-5.0", "8"],
             ]
         )
-        assert len(deduped) == 2
+        result = clean_dataframe(df)
+        assert len(result["rejected"]) == 2
+
+    def test_duplicates_dropped(self):
+        df = self._make_raw_df(
+            [
+                ["2024-01-01", "Push", "Bench", 1, "80.0", "8"],
+                ["2024-01-01", "Push", "Bench", 1, "80.0", "8"],  # exact duplicate
+                ["2024-01-01", "Push", "Bench", 2, "82.5", "6"],
+            ]
+        )
+        result = clean_dataframe(df)
+        assert result["duplicates_dropped"] == 1
+        assert len(result["clean"]) == 2
+
+    def test_clean_df_sorted(self):
+        df = self._make_raw_df(
+            [
+                ["2024-01-02", "Push", "OHP", 1, "40.0", "10"],
+                ["2024-01-01", "Push", "Bench", 1, "80.0", "8"],
+            ]
+        )
+        result = clean_dataframe(df)
+        dates = list(result["clean"]["Date"])
+        assert dates == sorted(dates)
+
+    def test_reject_pct_calculated_correctly(self):
+        df = self._make_raw_df(
+            [
+                ["2024-01-01", "Push", "Bench", 1, "80.0", "8"],   # clean
+                ["bad-date",  "Push", "Bench", 1, "80.0", "8"],    # rejected
+                ["2024-01-02", "Push", "OHP",   2, "40.0", "10"],  # clean
+                ["2024-01-03", "Push", "OHP",   2, "-1.0", "10"],  # rejected
+            ]
+        )
+        result = clean_dataframe(df)
+        assert result["reject_pct"] == pytest.approx(50.0)

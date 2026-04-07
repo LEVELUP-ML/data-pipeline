@@ -30,7 +30,7 @@ from train_model import load_and_prepare_data
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
-# ── Parameter grids ──
+#  Parameter grids 
 
 RF_PARAM_GRID = {
     "n_estimators": randint(50, 300),

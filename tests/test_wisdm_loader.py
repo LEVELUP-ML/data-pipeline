@@ -1,32 +1,15 @@
-"""Tests for WISDM accelerometer data loading."""
+"""Tests for WISDM accelerometer data loading.
 
-import os
-import tempfile
+Logic under test lives in dags/lib/wisdm.py — no inline copies here.
+"""
 
 import pandas as pd
 import pytest
 
-
-#  Inline loader
-
-def load_wisdm_file(path: str) -> pd.DataFrame:
-    df = pd.read_csv(
-        path,
-        header=None,
-        names=["user", "activity", "timestamp", "x", "y", "z"],
-        sep=",",
-        on_bad_lines="skip",
-    )
-    df["z"] = df["z"].astype(str).str.replace(";", "", regex=False)
-    for col in ("x", "y", "z", "timestamp"):
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["user"] = pd.to_numeric(df["user"], errors="coerce").astype("Int64")
-    df["activity"] = df["activity"].astype(str).str.strip()
-    df["_source_file"] = os.path.basename(path)
-    return df
+from lib.wisdm import load_wisdm_file
 
 
-#  Fixtures
+#  Fixtures 
 
 VALID_LINES = (
     "1600,A,123456789,0.12,-0.34,9.81;\n"
@@ -74,7 +57,7 @@ def missing_values_file(tmp_path):
     return str(f)
 
 
-#  Tests
+#  Tests: single file 
 
 
 class TestLoadWisdmFile:
@@ -112,7 +95,6 @@ class TestLoadWisdmFile:
 
     def test_malformed_lines_coerced_to_nan(self, malformed_file):
         df = load_wisdm_file(malformed_file)
-        # "bad" values become NaN, but rows still load
         nan_rows = df[df[["x", "y", "z"]].isna().any(axis=1)]
         assert len(nan_rows) >= 1
 
@@ -121,21 +103,23 @@ class TestLoadWisdmFile:
         assert df[["x", "y", "z"]].isna().any().any()
 
 
+#  Tests: multiple files 
+
+
 class TestLoadMultipleFiles:
 
     def test_concat_multiple_files(self, tmp_path):
         for uid in (1600, 1601):
             f = tmp_path / f"data_{uid}_accel_phone.txt"
-            f.write_text(f"{uid},A,100,0.1,-0.2,9.8;\n{uid},B,101,0.3,-0.4,9.7;\n")
+            f.write_text(
+                f"{uid},A,100,0.1,-0.2,9.8;\n{uid},B,101,0.3,-0.4,9.7;\n"
+            )
 
-        frames = []
-        for f in sorted(tmp_path.glob("*.txt")):
-            frames.append(load_wisdm_file(str(f)))
+        frames = [load_wisdm_file(str(f)) for f in sorted(tmp_path.glob("*.txt"))]
         combined = pd.concat(frames, ignore_index=True)
-
         assert len(combined) == 4
         assert set(combined["user"]) == {1600, 1601}
 
-    def test_no_txt_files_produces_empty(self, tmp_path):
+    def test_no_txt_files_produces_empty_list(self, tmp_path):
         frames = [load_wisdm_file(str(f)) for f in tmp_path.glob("*.txt")]
-        assert len(frames) == 0
+        assert frames == []
