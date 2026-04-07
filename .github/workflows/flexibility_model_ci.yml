@@ -1,24 +1,3 @@
-# .github/workflows/flexibility_model_ci.yml
-#
-# CI/CD pipeline for the flexibility forecasting model.
-# Follows the Model Development Guidelines (Section 7):
-#   - Trigger on pushes that affect model or feature code
-#   - Automated training, validation, bias check
-#   - Registry push on main branch (deploy gate)
-#   - Rollback signal on RMSE regression
-#   - Slack notifications on pass/fail
-#
-# Required GitHub Secrets:
-#   GCP_SA_KEY          — base64-encoded GCP service account JSON (with GCS write access)
-#   FIREBASE_SA_KEY     — base64-encoded Firebase Admin SDK JSON
-#   KAGGLE_USERNAME     — Kaggle API username
-#   KAGGLE_KEY          — Kaggle API key
-#   SLACK_WEBHOOK_URL   — Slack Incoming Webhook (optional, for notifications)
-#
-# Required GitHub Variables (repo-level):
-#   GCS_BACKUP_BUCKET    — e.g. raw_data_lvlup
-#   MODEL_RMSE_THRESHOLD — e.g. 10.0
-
 name: Flexibility Model CI/CD
 
 on:
@@ -30,6 +9,7 @@ on:
       - "dags/processing_dags/flexibility_model_dag.py"
       - "data_seeding/main.py"
       - "requirements.txt"
+      - "Dockerfile"
       - "tests/test_flexibility_features.py"
       - "tests/test_model_train.py"
       - ".github/workflows/flexibility_model_ci.yml"
@@ -52,34 +32,61 @@ env:
   MODEL_RMSE_THRESHOLD: ${{ github.event.inputs.rmse_threshold || vars.MODEL_RMSE_THRESHOLD || '10.0' }}
 
 jobs:
-  #  1. Lint & unit tests 
   test:
     name: Lint and unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v6
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
         with:
-          python-version: "3.11"
-          cache: pip
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ hashFiles('Dockerfile', 'requirements.txt') }}
+          restore-keys: ${{ runner.os }}-buildx-
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt pytest ruff
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: level-up-airflow:ci
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
 
-      - name: Fix lint issues
-        run: ruff check scripts/model_train.py dags/ --fix
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
       - name: Lint (ruff)
-        run: ruff check scripts/model_train.py dags/
+        run: |
+          docker run --rm \
+            -v "$PWD:/opt/airflow/workspace" \
+            -w /opt/airflow/workspace \
+            level-up-airflow:ci \
+            bash -c "ruff check scripts/model_train.py dags/ --fix; ruff check scripts/model_train.py dags/"
 
       - name: Run unit tests
-        run: pytest tests/ -v --tb=short -m "not slow"
+        run: |
+          docker run --rm \
+            -v "$PWD:/opt/airflow/workspace" \
+            -w /opt/airflow/workspace \
+            -e PYTHONPATH=/opt/airflow/workspace/dags \
+            -e AIRFLOW_VAR_GCS_BACKUP_BUCKET=ci-stub \
+            -e AIRFLOW_VAR_ALERT_WEBHOOK_URL=https://example.com/stub \
+            -e AIRFLOW_VAR_MODEL_RMSE_THRESHOLD=10.0 \
+            -e AIRFLOW_VAR_BIAS_MAX_RMSE_RATIO=2.0 \
+            -e AIRFLOW_VAR_FLEXIBILITY_RMSE_THRESHOLD=10.0 \
+            -e AIRFLOW__CORE__UNIT_TEST_MODE=true \
+            level-up-airflow:ci \
+            pytest tests/ -v --tb=short -m "not slow"
 
-  #  2. Train, validate, bias check 
   train:
     name: Train and validate model
     runs-on: ubuntu-latest
@@ -87,10 +94,10 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -110,9 +117,6 @@ jobs:
             > $AIRFLOW_HOME/secrets/firebase-admin.json
 
       - name: Generate synthetic features for CI
-        # Feature engineering requires a live Firestore connection which is not
-        # available in CI. We generate a synthetic feature file with the same
-        # schema so the model training code can run end-to-end and be validated.
         run: |
           if [ ! -f data/processed/flexibility_features.parquet ]; then
             echo "Generating synthetic feature file for CI..."
@@ -252,7 +256,6 @@ jobs:
               print(f"Slack notification skipped: {e}")
           PYEOF
 
-  #  3. Push to registry (main branch only) 
   deploy:
     name: Push to GCS model registry
     runs-on: ubuntu-latest
@@ -262,10 +265,10 @@ jobs:
     environment: production
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -299,7 +302,6 @@ jobs:
           bucket   = os.environ["GCS_BACKUP_BUCKET"]
           new_m    = json.load(open("data/models/flexibility/metrics.json"))
           new_rmse = new_m["gate_rmse"]
-
           result = subprocess.run(
               ["gsutil", "cat", f"gs://{bucket}/model_registry/flexibility/latest.json"],
               capture_output=True, text=True
@@ -307,19 +309,15 @@ jobs:
           if result.returncode != 0:
               print("No previous model in registry — first deploy, skipping rollback check.")
               sys.exit(0)
-
           prev      = json.loads(result.stdout)
           prev_rmse = float(prev.get("gate_rmse", float("inf")))
           threshold = prev_rmse * 1.10
-
           print(f"Previous model RMSE: {prev_rmse:.4f}")
           print(f"New model RMSE:      {new_rmse:.4f}")
           print(f"Regression threshold: {threshold:.4f}")
-
           if new_rmse > threshold:
               print(f"ROLLBACK: new model is {(new_rmse/prev_rmse - 1)*100:.1f}% worse. Blocking deploy.")
               sys.exit(1)
-
           print("Rollback check PASSED.")
           PYEOF
 
@@ -330,12 +328,10 @@ jobs:
           TS=$(date -u +%Y%m%dT%H%M%S)
           PREFIX="gs://${GCS_BACKUP_BUCKET}/model_registry/flexibility/${TS}"
           echo "Uploading to ${PREFIX}/"
-
           gsutil cp data/models/flexibility/metrics.json     "${PREFIX}/metrics.json"
           gsutil cp data/models/flexibility/bias_report.json "${PREFIX}/bias_report.json"
           gsutil cp data/models/flexibility/shap_summary.png "${PREFIX}/shap_summary.png" 2>/dev/null || true
           gsutil -m cp -r data/models/flexibility/plots/     "${PREFIX}/plots/" 2>/dev/null || true
-
           python - <<PYEOF
           import json, os
           m = json.load(open("data/models/flexibility/metrics.json"))
@@ -351,7 +347,6 @@ jobs:
           with open("/tmp/latest.json", "w") as f:
               json.dump(latest, f, indent=2)
           PYEOF
-
           gsutil cp /tmp/latest.json \
             "gs://${GCS_BACKUP_BUCKET}/model_registry/flexibility/latest.json"
           echo "Registry push complete: ${PREFIX}"

@@ -1,20 +1,3 @@
-# .github/workflows/energy_model_ci.yml
-#
-# CI/CD pipeline for the Level Up energy score prediction model.
-# Separate from the flexibility model pipeline.
-#
-# Model: RandomForest / XGBoost predicting daily energy score (0–100)
-#        from sleep, quiz, and activity features.
-#
-# Required GitHub Secrets (shared with flexibility pipeline):
-#   GCP_SA_KEY        — base64-encoded GCP service account JSON
-#   SLACK_WEBHOOK_URL — Slack Incoming Webhook (optional)
-#
-# Required GitHub Variables:
-#   GCS_BACKUP_BUCKET      — e.g. raw_data_lvlup
-#   ENERGY_MAE_THRESHOLD   — e.g. 5.0  (default if not set)
-#   ENERGY_R2_THRESHOLD    — e.g. 0.7  (default if not set)
-
 name: Energy Model CI/CD
 
 on:
@@ -24,6 +7,7 @@ on:
       - "scripts/energy/**"
       - "tests/energy/**"
       - "requirements.txt"
+      - "Dockerfile"
       - ".github/workflows/energy_model_ci.yml"
   pull_request:
     branches: [main]
@@ -49,31 +33,58 @@ env:
   ENERGY_R2_THRESHOLD: ${{ vars.ENERGY_R2_THRESHOLD || '0.7' }}
 
 jobs:
-  #  1. Lint & unit tests 
   test:
     name: Lint and unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v6
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
         with:
-          python-version: "3.11"
-          cache: pip
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ hashFiles('Dockerfile', 'requirements.txt') }}
+          restore-keys: ${{ runner.os }}-buildx-
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt pytest ruff
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: level-up-airflow:ci
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
       - name: Lint energy scripts
-        run: ruff check scripts/energy/ --fix && ruff check scripts/energy/
+        run: |
+          docker run --rm \
+            -v "$PWD:/opt/airflow/workspace" \
+            -w /opt/airflow/workspace \
+            level-up-airflow:ci \
+            bash -c "ruff check scripts/energy/ --fix; ruff check scripts/energy/"
 
       - name: Run energy model unit tests
-        run: pytest tests/energy/ -v --tb=short
+        run: |
+          docker run --rm \
+            -v "$PWD:/opt/airflow/workspace" \
+            -w /opt/airflow/workspace \
+            -e PYTHONPATH=/opt/airflow/workspace/dags \
+            -e AIRFLOW_VAR_GCS_BACKUP_BUCKET=ci-stub \
+            -e AIRFLOW_VAR_ALERT_WEBHOOK_URL=https://example.com/stub \
+            -e AIRFLOW__CORE__UNIT_TEST_MODE=true \
+            level-up-airflow:ci \
+            pytest tests/energy/ -v --tb=short
 
-  #  2. Train, validate, bias + SHAP 
   train:
     name: Train and validate energy model
     runs-on: ubuntu-latest
@@ -81,10 +92,10 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -98,8 +109,6 @@ jobs:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
       - name: Generate synthetic daily_joined features for CI
-        # In production this parquet comes from the Airflow synthetic data DAG.
-        # In CI we generate it inline with the same schema.
         run: |
           if [ ! -f data/processed/daily_joined.parquet ]; then
             echo "Generating synthetic daily_joined.parquet for CI..."
@@ -256,7 +265,6 @@ jobs:
               print(f"Slack skipped: {e}")
           PYEOF
 
-  #  3. Export + push to GCS (main branch only) 
   deploy:
     name: Export and push energy model
     runs-on: ubuntu-latest
@@ -266,10 +274,10 @@ jobs:
     environment: production
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -301,18 +309,12 @@ jobs:
           python - <<'PYEOF'
           import json, os, subprocess, sys
           from pathlib import Path
-
-          # CI trains on synthetic data which is not comparable to
-          # production-trained models in the registry. Skip rollback check
-          # and let the production Airflow DAG enforce it with real data.
           if os.environ.get("CI"):
               print("CI environment — skipping rollback check against registry.")
               sys.exit(0)
-
           bucket  = os.environ["GCS_BACKUP_BUCKET"]
           meta    = json.loads(Path("data/models/energy/training_metadata.json").read_text())
           new_mae = meta["test_mae"]
-
           result = subprocess.run(
               ["gsutil", "cat", f"gs://{bucket}/model_registry/energy/latest.json"],
               capture_output=True, text=True
@@ -320,15 +322,12 @@ jobs:
           if result.returncode != 0:
               print("No previous energy model in registry — first deploy, skipping rollback check.")
               sys.exit(0)
-
           prev      = json.loads(result.stdout)
           prev_mae  = float(prev.get("test_mae", float("inf")))
           threshold = prev_mae * 1.10
-
           print(f"Previous MAE: {prev_mae:.4f}")
           print(f"New MAE:      {new_mae:.4f}")
           print(f"Threshold:    {threshold:.4f}")
-
           if new_mae > threshold:
               print(f"ROLLBACK: new model is {(new_mae/prev_mae - 1)*100:.1f}% worse. Blocking deploy.")
               sys.exit(1)
@@ -354,16 +353,13 @@ jobs:
         run: |
           python - <<'PYEOF'
           import json, os, urllib.request
-
           url = os.environ.get("SLACK_WEBHOOK_URL", "")
           if not url:
               print("No SLACK_WEBHOOK_URL — skipping.")
               raise SystemExit(0)
-
           status    = ":rocket: Deployed" if "${{ job.status }}" == "success" else ":fire: Deploy Failed"
           sha_short = "${{ github.sha }}"[:8]
           text      = f"*Energy Model — {status}*\nCommit: `{sha_short}`"
-
           req = urllib.request.Request(
               url, json.dumps({"text": text}).encode(),
               {"Content-Type": "application/json"}, method="POST"

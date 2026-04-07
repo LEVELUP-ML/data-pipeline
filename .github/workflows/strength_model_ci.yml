@@ -8,6 +8,7 @@ on:
       - "dags/processing_dags/strength_features_dag.py"
       - "dags/processing_dags/strength_model_dag.py"
       - "requirements.txt"
+      - "Dockerfile"
       - ".github/workflows/strength_model_ci.yml"
   workflow_dispatch:
 
@@ -19,28 +20,57 @@ jobs:
   test:
     name: Lint and unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v6
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
         with:
-          python-version: "3.11"
-          cache: pip
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ hashFiles('Dockerfile', 'requirements.txt') }}
+          restore-keys: ${{ runner.os }}-buildx-
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt pytest ruff
+      - name: Build image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: level-up-airflow:ci
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
 
-      - name: Fix lint issues
-        run: ruff check scripts/model_train.py dags/ --fix
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
 
       - name: Lint (ruff)
-        run: ruff check scripts/model_train.py dags/
+        run: |
+          docker run --rm \
+            -v "$PWD:/opt/airflow/workspace" \
+            -w /opt/airflow/workspace \
+            level-up-airflow:ci \
+            bash -c "ruff check scripts/model_train.py dags/ --fix; ruff check scripts/model_train.py dags/"
 
       - name: Run unit tests
-        run: pytest tests/ -v --tb=short -m "not slow"
+        run: |
+          docker run --rm \
+            -v "$PWD:/opt/airflow/workspace" \
+            -w /opt/airflow/workspace \
+            -e PYTHONPATH=/opt/airflow/workspace/dags \
+            -e AIRFLOW_VAR_GCS_BACKUP_BUCKET=ci-stub \
+            -e AIRFLOW_VAR_ALERT_WEBHOOK_URL=https://example.com/stub \
+            -e AIRFLOW_VAR_MODEL_RMSE_THRESHOLD=10.0 \
+            -e AIRFLOW_VAR_BIAS_MAX_RMSE_RATIO=2.0 \
+            -e AIRFLOW_VAR_STRENGTH_RMSE_THRESHOLD=2000.0 \
+            -e AIRFLOW__CORE__UNIT_TEST_MODE=true \
+            level-up-airflow:ci \
+            pytest tests/ -v --tb=short -m "not slow"
 
   train:
     name: Train and validate strength model
@@ -49,10 +79,10 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -213,10 +243,10 @@ jobs:
     environment: production
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -247,18 +277,12 @@ jobs:
         run: |
           python - <<'PYEOF'
           import json, os, subprocess, sys
-
-          # CI trains on synthetic data which is not comparable to
-          # production-trained models in the registry. Skip rollback check
-          # and let the production Airflow DAG enforce it with real data.
           if os.environ.get("CI"):
               print("CI environment — skipping rollback check against registry.")
               sys.exit(0)
-
           bucket   = os.environ["GCS_BACKUP_BUCKET"]
           new_m    = json.load(open("data/models/strength/metrics.json"))
           new_rmse = new_m["gate_rmse"]
-
           result = subprocess.run(
               ["gsutil", "cat", f"gs://{bucket}/model_registry/strength/latest.json"],
               capture_output=True, text=True
@@ -266,15 +290,12 @@ jobs:
           if result.returncode != 0:
               print("No previous model in registry — first deploy, skipping rollback check.")
               sys.exit(0)
-
           prev      = json.loads(result.stdout)
           prev_rmse = float(prev.get("gate_rmse", float("inf")))
           threshold = prev_rmse * 1.10
-
           print(f"Previous model RMSE: {prev_rmse:.4f}")
           print(f"New model RMSE:      {new_rmse:.4f}")
           print(f"Regression threshold: {threshold:.4f}")
-
           if new_rmse > threshold:
               print(f"ROLLBACK: new model is {(new_rmse/prev_rmse - 1)*100:.1f}% worse. Blocking deploy.")
               sys.exit(1)
@@ -288,12 +309,10 @@ jobs:
           TS=$(date -u +%Y%m%dT%H%M%S)
           PREFIX="gs://${GCS_BACKUP_BUCKET}/model_registry/strength/${TS}"
           echo "Uploading to ${PREFIX}/"
-
           gsutil cp data/models/strength/metrics.json     "${PREFIX}/metrics.json"
           gsutil cp data/models/strength/bias_report.json "${PREFIX}/bias_report.json"
           gsutil cp data/models/strength/shap_summary.png "${PREFIX}/shap_summary.png" 2>/dev/null || true
           gsutil -m cp -r data/models/strength/plots/     "${PREFIX}/plots/" 2>/dev/null || true
-
           python - <<PYEOF
           import json, os
           m = json.load(open("data/models/strength/metrics.json"))
@@ -309,7 +328,6 @@ jobs:
           with open("/tmp/latest.json", "w") as f:
               json.dump(latest, f, indent=2)
           PYEOF
-
           gsutil cp /tmp/latest.json \
             "gs://${GCS_BACKUP_BUCKET}/model_registry/strength/latest.json"
           echo "Registry push complete: ${PREFIX}"
