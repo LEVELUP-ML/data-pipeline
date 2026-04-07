@@ -69,6 +69,7 @@ jobs:
           docker run --rm \
             -v "$PWD:/opt/airflow/workspace" \
             -w /opt/airflow/workspace \
+            -e RUFF_CACHE_DIR=/tmp/ruff_cache \
             level-up-airflow:ci \
             bash -c "ruff check scripts/model_train.py dags/ --fix; ruff check scripts/model_train.py dags/"
 
