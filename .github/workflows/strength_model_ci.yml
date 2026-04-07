@@ -1,20 +1,35 @@
-name: Strength Model CI/CD
+name: Flexibility Model CI/CD
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, "model/*", "feature/model-*"]
     paths:
       - "scripts/model_train.py"
-      - "dags/processing_dags/strength_features_dag.py"
-      - "dags/processing_dags/strength_model_dag.py"
+      - "dags/processing_dags/flexibility_features_dag.py"
+      - "dags/processing_dags/flexibility_model_dag.py"
+      - "data_seeding/main.py"
       - "requirements.txt"
       - "Dockerfile"
-      - ".github/workflows/strength_model_ci.yml"
+      - "tests/test_flexibility_features.py"
+      - "tests/test_model_train.py"
+      - ".github/workflows/flexibility_model_ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "scripts/model_train.py"
+      - "dags/processing_dags/flexibility_features_dag.py"
   workflow_dispatch:
+    inputs:
+      rmse_threshold:
+        description: "Override RMSE gate threshold (d7 horizon)"
+        required: false
+        default: "10.0"
 
 env:
   AIRFLOW_HOME: ${{ github.workspace }}
-  MODEL_RMSE_THRESHOLD: "15.0"
+  PYTHONDONTWRITEBYTECODE: 1
+  PYTHONUNBUFFERED: 1
+  MODEL_RMSE_THRESHOLD: ${{ github.event.inputs.rmse_threshold || vars.MODEL_RMSE_THRESHOLD || '10.0' }}
 
 jobs:
   test:
@@ -52,6 +67,7 @@ jobs:
       - name: Lint (ruff)
         run: |
           docker run --rm \
+            --entrypoint "" \
             -v "$PWD:/opt/airflow/workspace" \
             -w /opt/airflow/workspace \
             -e RUFF_CACHE_DIR=/tmp/ruff_cache \
@@ -61,6 +77,7 @@ jobs:
       - name: Run unit tests
         run: |
           docker run --rm \
+            --entrypoint "" \
             -v "$PWD:/opt/airflow/workspace" \
             -w /opt/airflow/workspace \
             -e PYTHONPATH=/opt/airflow/workspace/dags \
@@ -68,13 +85,13 @@ jobs:
             -e AIRFLOW_VAR_ALERT_WEBHOOK_URL=https://example.com/stub \
             -e AIRFLOW_VAR_MODEL_RMSE_THRESHOLD=10.0 \
             -e AIRFLOW_VAR_BIAS_MAX_RMSE_RATIO=2.0 \
-            -e AIRFLOW_VAR_STRENGTH_RMSE_THRESHOLD=2000.0 \
+            -e AIRFLOW_VAR_FLEXIBILITY_RMSE_THRESHOLD=10.0 \
             -e AIRFLOW__CORE__UNIT_TEST_MODE=true \
             level-up-airflow:ci \
             pytest tests/ -v --tb=short -m "not slow"
 
   train:
-    name: Train and validate strength model
+    name: Train and validate model
     runs-on: ubuntu-latest
     needs: test
     timeout-minutes: 60
@@ -89,17 +106,23 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt "dvc[gs]"
+        run: pip install -r requirements.txt
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Generate synthetic strength features for CI
+      - name: Set up Firebase service account
         run: |
-          if [ ! -f data/processed/strength_features.parquet ]; then
-            echo "Generating synthetic strength_features.parquet for CI..."
+          mkdir -p $AIRFLOW_HOME/secrets
+          echo "${{ secrets.FIREBASE_SA_KEY }}" | base64 -d \
+            > $AIRFLOW_HOME/secrets/firebase-admin.json
+
+      - name: Generate synthetic features for CI
+        run: |
+          if [ ! -f data/processed/flexibility_features.parquet ]; then
+            echo "Generating synthetic feature file for CI..."
             mkdir -p data/processed
             python - <<'PYEOF'
           import numpy as np
@@ -110,18 +133,20 @@ jobs:
           start = pd.Timestamp("2026-01-01")
 
           for u in range(8):
-              base = rng.uniform(200, 400)
+              base = rng.uniform(30, 70)
               for d in range(90):
-                  score = float(np.clip(base + d * 0.2 + rng.normal(0, 2), 0, 1000))
+                  score = float(np.clip(base + d * 0.05 + rng.normal(0, 0.5), 0, 100))
                   row = {
                       "user_id":          f"u{u:03d}",
                       "ref_date":         start + pd.Timedelta(days=d),
                       "ref_score":        score,
-                      "mean_score_5":     score + rng.normal(0, 1),
-                      "score_trend_5":    rng.uniform(-0.5, 0.5),
+                      "mean_score_5":     score + rng.normal(0, 0.3),
+                      "score_trend_5":    rng.uniform(-0.3, 0.3),
                       "workout_count_7d": int(rng.integers(1, 5)),
                       "workout_count_14d":int(rng.integers(2, 9)),
                       "days_since_last":  int(rng.integers(1, 4)),
+                      "current_streak":   int(rng.integers(1, 8)),
+                      "mean_effort_5":    rng.uniform(2, 4),
                       "age":              float(rng.integers(18, 55)),
                       "sex_encoded":      float(rng.integers(0, 2)),
                       "bmr":              float(rng.integers(1400, 2200)),
@@ -130,40 +155,39 @@ jobs:
                       "age_raw":          float(rng.integers(18, 55)),
                   }
                   for lag in range(1, 6):
-                      row[f"max_1rm_lag_{lag}"]  = float(np.clip(score * 1.2 + rng.normal(0, 5), 0, 1200))
-                      row[f"avg_1rm_lag_{lag}"]  = float(np.clip(score + rng.normal(0, 3), 0, 1000))
-                      row[f"volume_lag_{lag}"]   = float(np.clip(score * 5 + rng.normal(0, 20), 0, 5000))
-                      row[f"strength_lag_{lag}"] = float(np.clip(score + rng.normal(0, 2), 0, 1000))
+                      row[f"score_lag_{lag}"]    = float(np.clip(score + rng.normal(0, 1), 0, 100))
+                      row[f"effort_lag_{lag}"]   = float(rng.integers(1, 6))
+                      row[f"duration_lag_{lag}"] = float(rng.integers(20, 90))
+                      row[f"reach_lag_{lag}"]    = float(np.clip(10 + score * 0.4, 2, 55))
                       row[f"days_ago_lag_{lag}"] = float(rng.integers(1, 14))
-                  row["target_d1"]  = float(np.clip(score + rng.normal(0.5, 1), 0, 1000))
-                  row["target_d3"]  = float(np.clip(score + rng.normal(1.0, 2), 0, 1000))
-                  row["target_d7"]  = float(np.clip(score + rng.normal(2.0, 3), 0, 1000))
-                  row["target_d14"] = float(np.clip(score + rng.normal(3.0, 4), 0, 1000))
+                  row["target_d1"]  = float(np.clip(score + rng.normal(0.3, 0.3), 0, 100))
+                  row["target_d3"]  = float(np.clip(score + rng.normal(0.6, 0.5), 0, 100))
+                  row["target_d7"]  = float(np.clip(score + rng.normal(1.0, 0.8), 0, 100))
+                  row["target_d14"] = float(np.clip(score + rng.normal(1.5, 1.0), 0, 100))
                   rows.append(row)
 
           df = pd.DataFrame(rows)
-          df.to_parquet("data/processed/strength_features.parquet", index=False)
-          print(f"Generated {len(df)} synthetic strength feature rows for CI")
+          df.to_parquet("data/processed/flexibility_features.parquet", index=False)
+          print(f"Generated {len(df)} synthetic feature rows for CI")
           PYEOF
           else
-            echo "Strength features already present — skipping generation."
+            echo "Features already available — skipping."
           fi
 
-      - name: Train strength model
+      - name: Train model
         env:
           MLFLOW_TRACKING_URI: sqlite:///${{ env.AIRFLOW_HOME }}/data/models/mlflow.db
         run: |
-          mkdir -p data/models/strength
+          mkdir -p data/models/flexibility
           python scripts/model_train.py \
             --run-id "ci_${{ github.sha }}" \
-            --model-type strength \
             --rmse-threshold "${{ env.MODEL_RMSE_THRESHOLD }}"
 
       - name: Display metrics summary
         run: |
           python - <<'PYEOF'
           import json
-          m = json.load(open("data/models/strength/metrics.json"))
+          m = json.load(open("data/models/flexibility/metrics.json"))
           print(f"Winner: {m['winner_model']}")
           print(f"Gate ({m['gate_horizon']}) RMSE: {m['gate_rmse']:.4f}  (threshold={m['rmse_threshold']})")
           print(f"Passed gate: {m['passed_gate']}")
@@ -179,7 +203,7 @@ jobs:
         run: |
           python - <<'PYEOF'
           import json, sys
-          b = json.load(open("data/models/strength/bias_report.json"))
+          b = json.load(open("data/models/flexibility/bias_report.json"))
           flags = b.get("flagged", [])
           if flags:
               print(f"WARNING: {len(flags)} bias flag(s):")
@@ -193,12 +217,12 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: strength-model-${{ github.sha }}
+          name: flexibility-model-${{ github.sha }}
           path: |
-            data/models/strength/metrics.json
-            data/models/strength/bias_report.json
-            data/models/strength/shap_summary.png
-            data/models/strength/plots/
+            data/models/flexibility/metrics.json
+            data/models/flexibility/bias_report.json
+            data/models/flexibility/shap_summary.png
+            data/models/flexibility/plots/
           retention-days: 30
 
       - name: Notify Slack — training result
@@ -211,20 +235,20 @@ jobs:
           import json, os, urllib.request
           url = os.environ.get("SLACK_WEBHOOK_URL", "")
           if not url:
-              print("No SLACK_WEBHOOK_URL — skipping.")
+              print("No SLACK_WEBHOOK_URL set — skipping.")
               raise SystemExit(0)
           try:
-              m      = json.load(open("data/models/strength/metrics.json"))
+              m      = json.load(open("data/models/flexibility/metrics.json"))
               status = ":large_green_circle: PASSED" if m["passed_gate"] else ":red_circle: FAILED"
               text   = (
-                  f"*Strength Model CI — {status}*\n"
+                  f"*Flexibility Model CI — {status}*\n"
                   "Commit: `" + "${{ github.sha }}"[:8] + "`\n"
                   f"Winner: {m['winner_model']}\n"
                   f"Gate RMSE (d7): `{m['gate_rmse']:.4f}` (threshold `{m['rmse_threshold']}`)\n"
                   f"Bias flags: {len(m.get('bias_flagged', []))}"
               )
           except Exception as e:
-              text = f":fire: Strength Model CI — ERROR reading metrics: {e}"
+              text = f":fire: Flexibility Model CI — ERROR reading metrics: {e}"
           req = urllib.request.Request(
               url, json.dumps({"text": text}).encode(),
               {"Content-Type": "application/json"}, method="POST"
@@ -232,7 +256,7 @@ jobs:
           try:
               urllib.request.urlopen(req, timeout=10)
           except Exception as e:
-              print(f"Slack skipped: {e}")
+              print(f"Slack notification skipped: {e}")
           PYEOF
 
   deploy:
@@ -269,8 +293,8 @@ jobs:
       - name: Download model artifacts from CI job
         uses: actions/download-artifact@v4
         with:
-          name: strength-model-${{ github.sha }}
-          path: data/models/strength/
+          name: flexibility-model-${{ github.sha }}
+          path: data/models/flexibility/
 
       - name: Rollback check against deployed model
         env:
@@ -278,14 +302,11 @@ jobs:
         run: |
           python - <<'PYEOF'
           import json, os, subprocess, sys
-          if os.environ.get("CI"):
-              print("CI environment — skipping rollback check against registry.")
-              sys.exit(0)
           bucket   = os.environ["GCS_BACKUP_BUCKET"]
-          new_m    = json.load(open("data/models/strength/metrics.json"))
+          new_m    = json.load(open("data/models/flexibility/metrics.json"))
           new_rmse = new_m["gate_rmse"]
           result = subprocess.run(
-              ["gsutil", "cat", f"gs://{bucket}/model_registry/strength/latest.json"],
+              ["gsutil", "cat", f"gs://{bucket}/model_registry/flexibility/latest.json"],
               capture_output=True, text=True
           )
           if result.returncode != 0:
@@ -308,15 +329,15 @@ jobs:
           GCS_BACKUP_BUCKET: ${{ vars.GCS_BACKUP_BUCKET }}
         run: |
           TS=$(date -u +%Y%m%dT%H%M%S)
-          PREFIX="gs://${GCS_BACKUP_BUCKET}/model_registry/strength/${TS}"
+          PREFIX="gs://${GCS_BACKUP_BUCKET}/model_registry/flexibility/${TS}"
           echo "Uploading to ${PREFIX}/"
-          gsutil cp data/models/strength/metrics.json     "${PREFIX}/metrics.json"
-          gsutil cp data/models/strength/bias_report.json "${PREFIX}/bias_report.json"
-          gsutil cp data/models/strength/shap_summary.png "${PREFIX}/shap_summary.png" 2>/dev/null || true
-          gsutil -m cp -r data/models/strength/plots/     "${PREFIX}/plots/" 2>/dev/null || true
+          gsutil cp data/models/flexibility/metrics.json     "${PREFIX}/metrics.json"
+          gsutil cp data/models/flexibility/bias_report.json "${PREFIX}/bias_report.json"
+          gsutil cp data/models/flexibility/shap_summary.png "${PREFIX}/shap_summary.png" 2>/dev/null || true
+          gsutil -m cp -r data/models/flexibility/plots/     "${PREFIX}/plots/" 2>/dev/null || true
           python - <<PYEOF
           import json, os
-          m = json.load(open("data/models/strength/metrics.json"))
+          m = json.load(open("data/models/flexibility/metrics.json"))
           latest = {
               "timestamp": "${TS}",
               "prefix":    "${PREFIX}",
@@ -330,7 +351,7 @@ jobs:
               json.dump(latest, f, indent=2)
           PYEOF
           gsutil cp /tmp/latest.json \
-            "gs://${GCS_BACKUP_BUCKET}/model_registry/strength/latest.json"
+            "gs://${GCS_BACKUP_BUCKET}/model_registry/flexibility/latest.json"
           echo "Registry push complete: ${PREFIX}"
 
       - name: Notify Slack — deploy result
@@ -343,11 +364,11 @@ jobs:
           import json, os, urllib.request
           url = os.environ.get("SLACK_WEBHOOK_URL", "")
           if not url:
-              print("No SLACK_WEBHOOK_URL — skipping.")
+              print("No SLACK_WEBHOOK_URL set — skipping.")
               raise SystemExit(0)
           status    = ":rocket: Deployed" if "${{ job.status }}" == "success" else ":fire: Deploy Failed"
           sha_short = "${{ github.sha }}"[:8]
-          text      = f"*Strength Model — {status}*\nCommit: `{sha_short}`"
+          text      = f"*Flexibility Model — {status}*\nCommit: `{sha_short}`"
           req = urllib.request.Request(
               url, json.dumps({"text": text}).encode(),
               {"Content-Type": "application/json"}, method="POST"
@@ -355,5 +376,5 @@ jobs:
           try:
               urllib.request.urlopen(req, timeout=10)
           except Exception as e:
-              print(f"Slack skipped: {e}")
+              print(f"Slack notification skipped: {e}")
           PYEOF

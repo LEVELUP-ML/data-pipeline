@@ -68,6 +68,7 @@ jobs:
       - name: Lint energy scripts
         run: |
           docker run --rm \
+            --entrypoint "" \
             -v "$PWD:/opt/airflow/workspace" \
             -w /opt/airflow/workspace \
             -e RUFF_CACHE_DIR=/tmp/ruff_cache \
@@ -77,6 +78,7 @@ jobs:
       - name: Run energy model unit tests
         run: |
           docker run --rm \
+            --entrypoint "" \
             -v "$PWD:/opt/airflow/workspace" \
             -w /opt/airflow/workspace \
             -e PYTHONPATH=/opt/airflow/workspace/dags \

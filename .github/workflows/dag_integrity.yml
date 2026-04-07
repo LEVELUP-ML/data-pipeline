@@ -64,6 +64,7 @@ jobs:
       - name: Run DAG integrity tests
         run: |
           docker run --rm \
+            --entrypoint "" \
             -v "$PWD/dags:/opt/airflow/dags" \
             -v "$PWD/tests:/opt/airflow/tests" \
             -v "$PWD/pytest.ini:/opt/airflow/pytest.ini" \
